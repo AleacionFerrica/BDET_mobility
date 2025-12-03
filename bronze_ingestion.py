@@ -147,7 +147,7 @@ def load_trips(con, year, zone, month=None):
     files_df = con.sql(urls_query).df()
 
 
-    urls = files_df['source_url'].tolist()[-15:]
+    urls = files_df['source_url'].tolist()[-7:]
     if not urls:
         print("URLS not found for processing.")
         return
@@ -384,7 +384,7 @@ def parse_rent_ine():
             # Filtro de Años
             for dato in entrada.get("Data", []):
                 anyo = dato.get("Anyo")
-                if 2021 <= anyo :
+                if 2021 <= anyo <=2024:
                     resultados.append({
                         "ine_district": codigo_distrito,
                         "name": nombre_distrito,
@@ -473,14 +473,15 @@ def parse_population_ine():
             for dato in entrada.get("Data", []):
                 anyo = dato.get("Anyo")
                 if anyo: # Asegurar que existe el año
-                    resultados.append({
-                        "ine_section": codigo_seccion,
-                        "name": nombre_seccion,
-                        "concept": concepto,
-                        "year": f"{anyo}_value",
-                        "total_population": dato.get("Valor"),
-                        "source_url": URL
-                    })
+                    if 2021 <= anyo <=2024:
+                        resultados.append({
+                            "ine_section": codigo_seccion,
+                            "name": nombre_seccion,
+                            "concept": concepto,
+                            "year": f"{anyo}_value",
+                            "total_population": dato.get("Valor"),
+                            "source_url": URL
+                        })
 
         # --- CREACIÓN DE TABLA PIVOTADA ---
         if resultados:
@@ -518,8 +519,8 @@ def load_ine_data(df):
 
     #con.sql(f"DESCRIBE TABLE bronze.{table_name}").show()
     con.sql(f"""
-            INSERT INTO bronze.{table_name}
-            SELECT *, 
+            INSERT INTO bronze.{table_name} BY NAME
+            (SELECT *, 
             current_timestamp as ingestion_date
             FROM df AS new_data
             WHERE NOT EXISTS (
@@ -528,7 +529,7 @@ def load_ine_data(df):
                 WHERE existing.name = new_data.name
                 AND existing.{ine_id} = new_data.{ine_id}
                 AND existing.concept = new_data.concept
-            )
+            ))
         """)
 
 if __name__ == "__main__":
@@ -558,20 +559,27 @@ if __name__ == "__main__":
         """)
 
 
-    load_trips(con, year=2023, zone="Distritos", month=6)
-    #con.sql("DROP TABLE bronze.districts_info ")
-    # LOAD zones info
+    load_trips(con, year=2023, zone="GAU", month=6)
+    
+    # con.sql("DROP TABLE bronze.districts_info ")
+    # con.sql("DROP TABLE bronze.municiples_info ")
+    # con.sql("DROP TABLE bronze.gaus_info ")
+
+    # # LOAD zones info
     load_zone_info(con,zone="distritos")
+    load_zone_info(con,zone="municipios")
+    load_zone_info(con,zone="gaus")
 
-    df_rent = parse_rent_ine()
+
+    # df_rent = parse_rent_ine()
     
 
-    df_pop = parse_population_ine()
-    # print(df_pop[2023].sum())
-    #print(df_pop)
+    # df_pop = parse_population_ine()
+    # # print(df_pop[2023].sum())
+    # #print(df_pop)
     
-    load_ine_data(df_rent)
-    load_ine_data(df_pop)
+    # load_ine_data(df_rent)
+    # load_ine_data(df_pop)
     #print(len(con.sql("SELECT * FROM bronze.poblacion_total --WHERE ine_section LIKE '02%' ").df()))
 
     load_ine_mitma_zone_relation()
