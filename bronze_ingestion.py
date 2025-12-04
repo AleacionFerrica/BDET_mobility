@@ -566,20 +566,20 @@ if __name__ == "__main__":
     # con.sql("DROP TABLE bronze.gaus_info ")
 
     # # LOAD zones info
-    load_zone_info(con,zone="distritos")
-    load_zone_info(con,zone="municipios")
-    load_zone_info(con,zone="gaus")
+    # load_zone_info(con,zone="distritos")
+    # load_zone_info(con,zone="municipios")
+    # load_zone_info(con,zone="gaus")
 
 
-    # df_rent = parse_rent_ine()
+    df_rent = parse_rent_ine()
     
 
-    # df_pop = parse_population_ine()
-    # # print(df_pop[2023].sum())
-    # #print(df_pop)
+    df_pop = parse_population_ine()
+    # print(df_pop[2023].sum())
+    #print(df_pop)
     
-    # load_ine_data(df_rent)
-    # load_ine_data(df_pop)
+    load_ine_data(df_rent)
+    load_ine_data(df_pop)
     #print(len(con.sql("SELECT * FROM bronze.poblacion_total --WHERE ine_section LIKE '02%' ").df()))
 
     load_ine_mitma_zone_relation()

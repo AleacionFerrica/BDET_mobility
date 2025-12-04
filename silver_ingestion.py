@@ -135,6 +135,8 @@ def load_silver_trips(con, year, zone_type, month=None):
 
     """
     con.sql(query)
+
+
 def load_silver_ine_mitma_zones(con):
     q=f""" 
         SELECT 
@@ -177,19 +179,16 @@ def load_silver_zone(con,zone_type):
 
 
 def load_zone_pairs(con, zone_type):
-    con.sql(f"""
-        DELETE FROM silver.zone_pairs 
-        WHERE zone_type = '{zone_type}'
-      
-    """)
+    
     pairs_query=f"""--sql
                     WITH base AS (
                             SELECT
                                 '{zone_type}' AS zone_type,
                                 TRIM(id_zone)   AS id_zone,
                                 centroid
-                            FROM silver.districts_zone WHERE country_zone = 'ESP' --solo nos interesan zonas dentro de españa 
-                        )
+                            FROM silver.{zone_type}_zone WHERE country_zone = 'ESP' --solo nos interesan zonas dentro de españa 
+                                )
+                        
                         SELECT
                             a.zone_type,
                             a.id_zone AS id_origin,
@@ -205,7 +204,11 @@ def load_zone_pairs(con, zone_type):
     con.sql(f"""--sql
         CREATE TABLE IF NOT EXISTS silver.zone_pairs AS {pairs_query} LIMIT 0
     """)
-
+    con.sql(f"""
+        DELETE FROM silver.zone_pairs 
+        WHERE zone_type = '{zone_type}'
+      
+    """)
     con.sql("ALTER TABLE silver.zone_pairs SET PARTITIONED BY (zone_type)")
 
     con.sql(f""" --sql
@@ -213,6 +216,254 @@ def load_zone_pairs(con, zone_type):
             SELECT * FROM ({pairs_query})  
             
             """)
+
+def population_check(con):
+    table_name = "bronze.poblacion_total"
+    target_table = "silver.spain_population"
+
+    # Deteccion columnas de años
+    cols_df = con.sql(f"DESCRIBE {table_name}").df()
+    year_cols = [f"{c}" for c in cols_df['column_name'] if c.endswith('_value')]
+    year_cols.sort()
+    years_labels = [c.split('_')[0] for c in year_cols]
+
+    # listas para SQL (con comillas para evitar errores de sintaxis)
+    sql_col_list = "[" + ", ".join([f'"{c}"' for c in year_cols]) + "]"
+    sql_year_label_list = "[" + ", ".join([f"'{y}'" for y in years_labels]) + "]"
+
+    print(f"Years population data from: {years_labels}")
+
+    # 2. Query Maestra: Unpivot + Imputación + Estadísticas + Detección de Atípicos
+    query_transformacion = f"""--sql
+    WITH raw_unpivoted AS (
+        SELECT 
+            ine_section, -- Usamos Sección Censal como ID
+            name,
+            UNNEST({sql_year_label_list})::INT as year,
+            UNNEST({sql_col_list})::DOUBLE as population_raw
+        FROM {table_name}
+    ),
+    calc_imputation AS (
+        SELECT 
+            *,
+            -- IMPUTACIÓN (Forward Fill + Backward Fill + 0)
+            COALESCE(
+                population_raw, 
+                
+                -- Si falta dato, coge el del año anterior
+                LAST_VALUE(population_raw IGNORE NULLS) 
+                    OVER(PARTITION BY ine_section ORDER BY year 
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
+                
+                --  Si es el primer año y falta, coge el del siguiente
+                FIRST_VALUE(population_raw IGNORE NULLS) 
+                    OVER(PARTITION BY ine_section ORDER BY year 
+                        ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING),
+                
+                -- Si todo es nulo, asume 0 habitantes
+                0
+            ) as population,
+            
+            CASE WHEN population_raw IS NULL THEN TRUE ELSE FALSE END as is_imputed
+        FROM raw_unpivoted
+    ),
+    stats_calc AS (
+        SELECT 
+            *,
+            -- Variación Interanual
+            (population - LAG(population) OVER(PARTITION BY ine_section ORDER BY year)) / 
+            NULLIF(LAG(population) OVER(PARTITION BY ine_section ORDER BY year), 0) as pct_change,
+            
+            -- Z-Score (Comparación con el resto de secciones ese año)
+            (population - AVG(population) OVER(PARTITION BY year)) / 
+            NULLIF(STDDEV(population) OVER(PARTITION BY year), 0) as z_score_size
+        FROM calc_imputation
+    )
+    SELECT 
+        *,
+        -- --- DETECCIÓN DE ATÍPICOS ---
+        -- Marca TRUE si es un outlier estadístico extremo Y ADEMÁS ha tenido un cambio brusco
+        CASE 
+            WHEN ABS(z_score_size) > 10 
+                OR ABS(pct_change) > 2
+            THEN TRUE 
+            ELSE FALSE 
+        END as is_atypical
+    FROM stats_calc
+
+    """
+
+    con.sql(f"CREATE OR REPLACE TABLE {target_table} AS {query_transformacion}")
+
+
+    n_atipicos = con.sql(f"SELECT count(*) FROM {target_table} WHERE is_atypical = TRUE").fetchone()[0]
+    print(f"Marked {n_atipicos} observations as atypical.")
+
+def average_rent_check(con):
+    table_name = "bronze.renta_media"
+    target_table = "silver.average_rent" # Nombre de la tabla destino
+
+    # 1. Detección de columnas (Tu código original)
+    cols_df = con.sql(f"DESCRIBE {table_name}").df()
+    year_cols = [f"{c}"for c in cols_df['column_name'] if c.endswith('_value')]
+    year_cols.sort()
+    years_labels = [c.split('_')[0] for c in year_cols]
+
+    sql_col_list = "[" + ", ".join([f'"{c}"' for c in year_cols]) + "]"
+    sql_year_label_list = "[" + ", ".join([f"'{y}'" for y in years_labels]) + "]"
+
+    print(f"Detectados años: {years_labels}")
+
+    # 2. Query Maestra con lógica de Atípicos añadida
+    query_transformacion = f"""--sql
+    WITH raw_unpivoted AS (
+        SELECT 
+            ine_district,
+            name,
+            UNNEST({sql_year_label_list})::INT as year,
+            UNNEST({sql_col_list})::DOUBLE as rent_raw
+        FROM {table_name}
+    ),
+    calc_imputation AS (
+        SELECT 
+            *,
+            COALESCE(
+                rent_raw, 
+                LAST_VALUE(rent_raw IGNORE NULLS) 
+                    OVER(PARTITION BY ine_district ORDER BY year 
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
+                FIRST_VALUE(rent_raw IGNORE NULLS) 
+                    OVER(PARTITION BY ine_district ORDER BY year 
+                        ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING),
+                0
+            ) as rent,
+            CASE WHEN rent_raw IS NULL THEN TRUE ELSE FALSE END as is_imputed
+        FROM raw_unpivoted
+    ),
+    stats_calc AS (
+        SELECT 
+            *,
+            -- Cálculo de variación (Change)
+            (rent - LAG(rent) OVER(PARTITION BY ine_district ORDER BY year)) / 
+            NULLIF(LAG(rent) OVER(PARTITION BY ine_district ORDER BY year), 0) as pct_change,
+            
+            -- Cálculo de Z-Score
+            (rent - AVG(rent) OVER(PARTITION BY year)) / 
+            NULLIF(STDDEV(rent) OVER(PARTITION BY year), 0) as z_score_size
+        FROM calc_imputation
+    )
+    SELECT 
+        *,
+        -- --- LÓGICA DE DETECCIÓN DE ATÍPICOS ---
+        -- Condición: (Z-Score > 5 O < -5) Y (Cambio fuera de rango -1 a 1)
+        CASE 
+            WHEN ABS(z_score_size) > 5  -- Esto cubre > 5 y < -5
+                OR ABS(pct_change) > 1 -- Esto cubre > 1 (100%) y < -1 (-100%)
+            THEN TRUE 
+            ELSE FALSE 
+        END as is_atypical
+    FROM stats_calc
+    ORDER BY ine_district, year
+    """
+
+    con.sql(f"CREATE OR REPLACE TABLE {target_table} AS {query_transformacion}")
+
+    n_atipicos = con.sql(f"SELECT count(*) FROM {target_table} WHERE is_atypical = TRUE").fetchone()[0]
+    print(f"Marked {n_atipicos} observations as atypical.")
+
+def check_trips_quality(con):
+    source_table="silver.od_trips"
+
+    print(f"Checking statistical quality from {source_table}...")
+
+    # 1. Definimos la query de análisis
+    query = f"""--sql
+    WITH base_metrics AS (
+        SELECT 
+            *,
+            -- Métrica derivada clave: Kilómetros promedio por viaje unitario
+            -- Si n_trips es 0, evitamos división por cero
+            trips_total_length_km / NULLIF(n_trips, 0) as avg_km_per_trip
+        FROM {source_table} USING SAMPLE 5% -- dado el gran numero de viajes usamos un sample de los datos
+    ),
+    stats_window AS (
+        SELECT 
+            *,
+            -- --- ESTADÍSTICAS POR GRUPO DE DISTANCIA ---
+            -- Comparamos cada fila contra el comportamiento normal de su rango de distancia
+            
+            -- A) Para N_TRIPS
+            AVG(n_trips) OVER(PARTITION BY distance_group_km) as mean_trips,
+            STDDEV(n_trips) OVER(PARTITION BY distance_group_km) as std_trips,
+            
+            -- B) Para TOTAL LENGTH
+            AVG(trips_total_length_km) OVER(PARTITION BY distance_group_km) as mean_len,
+            STDDEV(trips_total_length_km) OVER(PARTITION BY distance_group_km) as std_len,
+            
+            -- C) Para AVG KM PER TRIP (Detecta inconsistencias físicas)
+            AVG(avg_km_per_trip) OVER(PARTITION BY distance_group_km) as mean_avg_km,
+            STDDEV(avg_km_per_trip) OVER(PARTITION BY distance_group_km) as std_avg_km
+
+        FROM base_metrics
+    ),
+    z_scores AS (
+        SELECT 
+            *,
+            -- Cálculo de Z-SCORES (Cuantas desviaciones estándar se aleja de la media)
+            (n_trips - mean_trips) / NULLIF(std_trips, 0) as z_score_trips,
+            (trips_total_length_km - mean_len) / NULLIF(std_len, 0) as z_score_len,
+            (avg_km_per_trip - mean_avg_km) / NULLIF(std_avg_km, 0) as z_score_avg_km
+        FROM stats_window
+    )
+    SELECT 
+        date,
+        zone_type,
+        id_origin,
+        id_destination,
+        distance_group_km,
+        n_trips,
+        trips_total_length_km,
+
+        ROUND(avg_km_per_trip, 2) as avg_km_per_trip,
+        -- Guardamos los Z-Scores para filtrar
+        ROUND(z_score_trips, 2) as z_n_trips,
+        ROUND(z_score_len, 2) as z_total_km,
+        ROUND(z_score_avg_km, 2) as z_avg_km,
+
+        -- --- DIAGNÓSTICO FINAL (FLAGS) ---
+        CASE 
+            WHEN ABS(z_score_trips) > 20 THEN 'extreme volume'
+            WHEN ABS(z_score_avg_km) > 20 THEN 'Inconsistent Distance'
+            WHEN avg_km_per_trip > 1000 THEN 'Travel > 1000km'
+            WHEN n_trips > 0 AND trips_total_length_km = 0 THEN 'Viajes sin Distancia'
+            ELSE 'OK'
+        END as quality_flag,
+        
+        ingestion_date
+    FROM z_scores
+    -- Opcional: Filtramos solo lo sospechoso para que la tabla auxiliar no sea gigante
+    -- WHERE ABS(z_score_trips) > 3 OR ABS(z_score_avg_km) > 3
+    """
+
+ 
+    print("\nSummary atypical trips:")
+    summary = con.sql(f"""
+        SELECT quality_flag, count(*) as count 
+        FROM ({query})
+        GROUP BY quality_flag 
+        ORDER BY count DESC
+    """).show()
+    
+
+
+    # Mostramos ejemplos de errores
+    print("\nMost extreme atypical:")
+    con.sql(f"""
+        SELECT * FROM ({query})
+        WHERE quality_flag != 'OK' 
+        ORDER BY (ABS(z_avg_km),ABS(z_n_trips), ABS(z_total_km)) DESC LIMIT 10
+    """).show()
+
 
 if __name__ == "__main__":
     con = duckdb.connect()
@@ -233,3 +484,7 @@ if __name__ == "__main__":
     load_silver_zone(con,zone_type="gaus")
     load_zone_pairs(con, zone_type="districts")
     load_zone_pairs(con, zone_type="gaus")
+
+    population_check(con)
+    average_rent_check(con)
+    check_trips_quality(con)
