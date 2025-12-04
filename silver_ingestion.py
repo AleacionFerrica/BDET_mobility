@@ -218,6 +218,14 @@ def load_zone_pairs(con, zone_type):
             """)
 
 def population_check(con):
+    con.sql(f"""SELECT 
+        SUM("2021_value") as total_2021, 
+        SUM("2022_value") as total_2022, 
+        SUM("2023_value") as total_2023, 
+        SUM("2024_value") as total_2024, 
+        
+        
+        FROM bronze.poblacion_total """)
     table_name = "bronze.poblacion_total"
     target_table = "silver.spain_population"
 
@@ -373,7 +381,15 @@ def average_rent_check(con):
 
 def check_trips_quality(con):
     source_table="silver.od_trips"
+    con.sql("""
+        -- Cuántas filas tengo y qué fechas cubro
+        SELECT
+            MIN(trip_date) AS min_date,
+            MAX(trip_date) AS max_date,
+            COUNT(*)       AS num_rows
+        FROM silver.od_trips;
 
+                """).show()
     print(f"Checking statistical quality from {source_table}...")
 
     # 1. Definimos la query de análisis
