@@ -8,33 +8,119 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 import re
 
-def map_gaus(con):
-    print("Generando tabla de mapeo para códigos GAU...")
-    
-    # 1. Definimos la lógica
-    # Extraemos todos los códigos únicos que empiezan por 'GAU' de tu tabla bronze
-    # Asignamos un número empezando por 90001 (para evitar coincidir con CP o INE)
-    
-    mapping_query = """--sql
-    WITH unique_gaus AS (
-        SELECT DISTINCT 
-            TRIM(id_gaus) as mitma_id -- Quitamos espacios por seguridad
-        FROM bronze.gaus_info
-        WHERE id_gaus LIKE 'GAU%'
-    )
-    SELECT 
-        mitma_id,
-        CAST((abs(hash(mitma_id)) % 100000) + 900000 AS VARCHAR)as internal_id
-    FROM unique_gaus
-    """
-
-
-    con.sql(f"""
-        CREATE OR REPLACE TABLE silver.gau_id_mapping AS 
-        {mapping_query}
+def create_master_zones(con):
+    # secuencia (empezamos en 1)
+    con.sql("""
+        CREATE TABLE IF NOT EXISTS silver.dim_zones (
+            id_zone INTEGER,             -- Entero simple (lo calcularemos nosotros)
+            original_id VARCHAR,
+            zone_type VARCHAR,
+            source VARCHAR,
+            ingestion_date TIMESTAMP
+        );
     """)
+    
+    # Índice para velocidad (opcional pero recomendado)
+    # Nota: Si DuckLake no soporta índices, puedes omitir esta línea
+    try:
+        con.sql("CREATE UNIQUE INDEX IF NOT EXISTS idx_original_id ON silver.dim_zones (original_id);")
+    except:
+        pass # Si falla por limitaciones del Lake, seguimos igual
+        
+    print("Master Table 'silver.dim_zones' .")
 
-    print("Tabla 'silver.gau_id_mapping' creada.")
+def update_master_zones(con):
+    print("Searching new zone codes...")
+
+    # 1. Definimos la query de los candidatos (igual que antes)
+    # Buscamos todos los códigos que existen en Bronze
+    query_candidatos = """--sql
+        WITH gaus_info AS (SELECT * FROM bronze.gaus_info 
+                    WHERE id_gaus != 'NA'
+                      AND id_gaus IS NOT NULL),
+
+            districts_info AS (SELECT * FROM bronze.districts_info  
+                    WHERE id_districts != 'NA' 
+                    AND id_districts IS NOT NULL),
+
+            municipless_info AS (SELECT * FROM bronze.municiples_info 
+                    WHERE id_municiples != 'NA' 
+                    AND id_municiples IS NOT NULL),
+
+            ine_mitma_zones AS (SELECT * FROM bronze.ine_mitma_zones 
+                    WHERE seccion_ine != 'NA' 
+                    AND seccion_ine IS NOT NULL 
+                    AND distrito_ine != 'NA' 
+                    AND municipio_ine != 'NA'),
+
+        all_codes AS (
+            SELECT TRIM(id_gaus) as original_id, 'gaus' as zone_type, 'mitma' as source FROM gaus_info
+            UNION ALL
+            SELECT TRIM(id_districts) as original_id, 'districts' as zone_type, 'mitma' as source FROM districts_info
+            UNION ALL
+            SELECT TRIM(id_municiples) as original_id, 'municiples' as zone_type, 'mitma' as source FROM municipless_info
+            UNION ALL
+            SELECT TRIM(origen) as original_id, CASE WHEN zone_type  = 'GAU' THEN 'gaus' WHEN zone_type  = 'Distritos' THEN 'districts' WHEN zone_type  = 'Municipios' THEN 'municiples' ELSE zone_type  END as zone_type, 'mitma' as source FROM bronze.trips
+            UNION ALL
+            SELECT TRIM(destino) as original_id,CASE WHEN zone_type  = 'GAU' THEN 'gaus' WHEN zone_type  = 'Distritos' THEN 'districts' WHEN zone_type  = 'Municipios' THEN 'municiples' ELSE zone_type END as zone_type, 'mitma' as source FROM bronze.trips
+            UNION ALL
+            SELECT  TRIM(gau_mitma) as original_id, 'gaus' as zone_type , 'mitma' as source FROM ine_mitma_zones
+            UNION ALL
+            SELECT  TRIM(distrito_mitma) as original_id, 'districts' as zone_type, 'mitma' as source FROM ine_mitma_zones
+            UNION ALL
+            SELECT TRIM(municipio_mitma) as original_id, 'municiples'  as zone_type, 'mitma' as source FROM ine_mitma_zones
+
+            UNION ALL
+            SELECT TRIM(distrito_ine) as original_id, 'districts' as zone_type, 'ine' as source FROM ine_mitma_zones
+            UNION ALL
+            SELECT TRIM(municipio_ine) as original_id, 'municiples' as zone_type, 'ine' as source FROM ine_mitma_zones
+            UNION ALL
+            SELECT TRIM(seccion_ine) as original_id, 'sections' as zone_type, 'ine' as source FROM ine_mitma_zones
+
+        ),
+        distinct_candidates AS (
+            SELECT DISTINCT original_id,  zone_type, source FROM all_codes WHERE original_id IS NOT NULL
+        )
+        SELECT * FROM distinct_candidates
+        """
+
+    # INSERT 
+    #  a) Calculamos el MAX(id_zone) actual (si es NULL, usamos 0)
+    #  b) A los nuevos les sumamos ROW_NUMBER() + ese MAX
+    
+    con.sql(f"""--sql
+        INSERT INTO silver.dim_zones (id_zone, original_id, zone_type, source, ingestion_date) 
+        
+        WITH current_state AS (
+            -- Obtenemos el último ID usado. Si la tabla está vacía, devuelve 0.
+            SELECT COALESCE(MAX(id_zone), 0) as max_current_id 
+            FROM silver.dim_zones
+        ),
+        new_codes_to_insert AS (
+            -- Seleccionamos solo los códigos que NO existen en la tabla maestra
+            SELECT 
+                c.original_id, 
+                c.zone_type,
+                c.source
+            FROM ({query_candidatos}) c
+            LEFT JOIN silver.dim_zones existing 
+                ON c.original_id = existing.original_id
+            WHERE existing.original_id IS NULL
+        )
+        SELECT 
+            -- FÓRMULA MAESTRA:
+            (SELECT max_current_id FROM current_state) + ROW_NUMBER() OVER(ORDER BY nc.original_id) as new_sk,
+            
+            nc.original_id,
+            nc.zone_type,
+            nc.source,
+            current_timestamp
+        FROM new_codes_to_insert nc
+    """)
+    
+
+
+
 
 
 def load_silver_trips(con, year, zone_type, month=None):
@@ -86,18 +172,12 @@ def load_silver_trips(con, year, zone_type, month=None):
     SELECT 
             try_strptime(fecha::VARCHAR || LPAD(periodo::VARCHAR, 2, '0'), '%Y%m%d%H') as date,
 
-            CASE WHEN zone_type = 'Distritos' THEN 'distritcs' WHEN zone_type = 'Municipios' THEN 'municiples' 
-                WHEN zone_type ='GAU' THEN 'gaus' END as origin_activity,
+            CASE WHEN br.zone_type = 'Distritos' THEN 'distritcs' WHEN br.zone_type = 'Municipios' THEN 'municiples' 
+                WHEN br.zone_type ='GAU' THEN 'gaus' END as zone_type,
 
-            COALESCE(
-                mapo.internal_id,              -- 1. Intenta usar el ID del mapa (si era GAU texto)
-                TRIM(CAST(br.origen AS VARCHAR)) -- 2. Si no cruzó, convierte el original a número
-                ) AS id_origin,
+            d_o.id_zone AS id_origin,
 
-            COALESCE(
-                    mapd.internal_id, 
-                    TRIM(CAST(br.destino AS VARCHAR))
-                ) AS id_destination,
+            d_d.id_zone AS id_destination,
 
 
             CASE WHEN actividad_origen  = 'casa' THEN 'Home' WHEN actividad_origen  = 'trabajo_estudio' THEN 'Work_Study'  
@@ -124,58 +204,165 @@ def load_silver_trips(con, year, zone_type, month=None):
             CURRENT_TIMESTAMP AS ingestion_date
 
         FROM bronze.trips br 
-        LEFT JOIN silver.gau_id_mapping AS mapo ON br.origen = mapo.mitma_id
-        LEFT JOIN silver.gau_id_mapping AS mapd ON br.destino = mapd.mitma_id
+        LEFT JOIN silver.dim_zones d_o
+            ON br.origen = d_o.original_id AND d_o.source = 'mitma' AND d_o.zone_type = '{zone_dic[zone_type]}'
+        LEFT JOIN silver.dim_zones d_d 
+            ON br.destino = d_d.original_id AND d_d.source = 'mitma' AND d_d.zone_type = '{zone_dic[zone_type]}'
         WHERE 
             -- FILTROS NUMÉRICOS (Ignoran ceros a la izquierda o espacios)
             --try_strptime(date::VARCHAR ), '%Y%m%d%H') as date 
             YEAR(try_strptime(fecha::VARCHAR , '%Y%m%d')) = {year}
             AND MONTH(try_strptime(fecha::VARCHAR, '%Y%m%d')) = {month}
-            AND TRIM(zone_type) = '{zone_type}'
+            AND TRIM(br.zone_type) = '{zone_type}'
+
 
     """
     con.sql(query)
 
 
 def load_silver_ine_mitma_zones(con):
-    q=f""" 
-        SELECT 
-        TRIM(NULLIF(seccion_ine , 'NA')) as sections_ine,
-        TRIM(distrito_ine) as districts_ine,
-        TRIM(municipio_ine) as municiples_ine,
-        
-        TRIM(distrito_mitma) as districts_mitma,
-        TRIM(municipio_mitma) as municiples_mitma,
-        COALESCE(m.internal_id,TRIM(br.gau_mitma)) as gau_mitma,
+   
+    q = f""" --sql
+            SELECT 
+                --  SECCIÓN (INE)
+                d_sec.id_zone as id_sections_ine,
 
-        current_timestamp as ingestion_date
-        FROM bronze.ine_mitma_zones AS br LEFT JOIN silver.gau_id_mapping AS m ON br.gau_mitma = m.mitma_id
-        WHERE NULLIF(seccion_ine , 'NA') NOT NULL
+                --  DISTRITO (INE)
+                d_dis.id_zone  as id_districts_ine,
+
+                --  MUNICIPIO (INE)
+                d_mun.id_zone as id_municiples_ine,
+                
+                -- DISTRITO (MITMA)
+                d_dis_mit.id_zone as id_districts_mitma,
+
+                -- MUNICIPIO (MITMA)
+                d_mun_mit.id_zone as id_municiples_mitma,
+
+                --  GAU (MITMA)
+                d_gau.id_zone as id_gaus_mitma,
+
+                current_timestamp as ingestion_date
+
+            FROM bronze.ine_mitma_zones br
+            
+            -- JOIN 1: Para Sección
+            LEFT JOIN silver.dim_zones d_sec 
+                ON TRIM(br.seccion_ine) = d_sec.original_id 
+                AND d_sec.zone_type = 'sections' -- Opcional: si tu diccionario distingue tipos
+
+            -- JOIN 2: Para Distrito INE
+            LEFT JOIN silver.dim_zones d_dis 
+                ON TRIM(br.distrito_ine) = d_dis.original_id
+                AND d_dis.zone_type = 'districts' AND d_dis.source = 'ine'
+
+            -- JOIN 3: Para Municipio INE
+            LEFT JOIN silver.dim_zones d_mun 
+                ON TRIM(br.municipio_ine) = d_mun.original_id
+                AND d_mun.zone_type = 'municiples' AND d_mun.source = 'ine'
+
+            -- JOIN 4: Para Distrito MITMA
+            LEFT JOIN silver.dim_zones d_dis_mit 
+                ON TRIM(br.distrito_mitma) = d_dis_mit.original_id
+                AND d_dis_mit.zone_type = 'districts' AND d_dis_mit.source = 'mitma'
+
+            -- JOIN 5: Para Municipio MITMA
+            LEFT JOIN silver.dim_zones d_mun_mit 
+                ON TRIM(br.municipio_mitma) = d_mun_mit.original_id
+                AND d_mun_mit.zone_type = 'municiples' AND d_mun_mit.source = 'mitma'
+
+            -- JOIN 6: Para GAU
+            LEFT JOIN silver.dim_zones d_gau 
+                ON TRIM(br.gau_mitma) = d_gau.original_id
+                AND d_gau.zone_type = 'gaus'
+
+            WHERE NULLIF(br.seccion_ine, 'NA') IS NOT NULL
         """
+
     con.sql(f"CREATE OR REPLACE TABLE silver.ine_mitma_zones AS {q} ")
 
-def load_silver_zone(con,zone_type):
-    q = f""" --sql
-    SELECT
-          COALESCE(m.internal_id,br.id_{zone_type}) as id_zone, --COALESCE elije uno de los dos argumentos que no sea nulo
-          ifnull(TRIM(br.name_{zone_type}), 'external') AS name,
-          CASE  -- comprueba si el codigo viene de fuera de españa en caso lo pone como EXT
-                WHEN br.id_{zone_type} LIKE 'FR%' 
-                OR br.id_{zone_type} LIKE 'PT%' 
-                OR br.id_{zone_type} LIKE 'IT%' 
-                OR br.id_{zone_type} LIKE 'DE%' 
-                OR br.id_{zone_type} LIKE 'UK%' 
-                OR br.id_{zone_type} LIKE 'US%'
-                OR br.id_{zone_type} LIKE 'EXT%'
-                THEN 'EXT'
-                ELSE 'ESP'
+def load_silver_zone(con):
+    #zone_type = "districts"
+    q = """ --sql
+    WITH gaus AS (SELECT 
+                id_zone,
+                ifnull(TRIM(br.name_gaus), 'external') AS name_zone,
+                br.zone_type,
+                CASE  -- comprueba si el codigo viene de fuera de españa en caso lo pone como EXT
+                    WHEN br.id_gaus LIKE 'FR%' 
+                    OR br.id_gaus LIKE 'PT%' 
+                    OR br.id_gaus LIKE 'IT%' 
+                    OR br.id_gaus LIKE 'DE%' 
+                    OR br.id_gaus LIKE 'UK%' 
+                    OR br.id_gaus LIKE 'US%'
+                    OR br.id_gaus LIKE 'EXT%'
+                    THEN 'EXT'
+                    ELSE 'ESP'
                 END AS country_zone,
-                br.geometry as geometry,
-                br.centroid as centroid,
+                geometry,
+                centroid,
                 ST_PointOnSurface(br.geometry) AS visual_point,
-                CURRENT_TIMESTAMP       AS ingestion_date
-        FROM bronze.{zone_type}_info AS br LEFT JOIN silver.gau_id_mapping AS m ON br.id_{zone_type} = m.mitma_id """
-    con.sql(f"CREATE OR REPLACE TABLE silver.{zone_type}_zone AS {q} ")
+            FROM bronze.gaus_info br
+            LEFT JOIN silver.dim_zones d
+            ON br.id_gaus = d.original_id AND br.zone_type = d.zone_type AND d.source = 'mitma'
+            WHERE id_gaus != 'NA' AND id_gaus IS NOT NULL 
+    ),
+    municiples AS (SELECT 
+                id_zone,
+                ifnull(TRIM(br.name_municiples), 'external') AS name_zone,
+                br.zone_type,
+                CASE  -- comprueba si el codigo viene de fuera de españa en caso lo pone como EXT
+                    WHEN br.id_municiples LIKE 'FR%' 
+                    OR br.id_municiples LIKE 'PT%' 
+                    OR br.id_municiples LIKE 'IT%' 
+                    OR br.id_municiples LIKE 'DE%' 
+                    OR br.id_municiples LIKE 'UK%' 
+                    OR br.id_municiples LIKE 'US%'
+                    OR br.id_municiples LIKE 'EXT%'
+                    THEN 'EXT'
+                    ELSE 'ESP'
+                END AS country_zone,
+                geometry,
+                centroid,
+                ST_PointOnSurface(br.geometry) AS visual_point,
+            FROM bronze.municiples_info br
+            LEFT JOIN silver.dim_zones d
+            ON br.id_municiples = d.original_id AND br.zone_type = d.zone_type AND d.source = 'mitma'
+            WHERE id_municiples != 'NA' AND id_municiples IS NOT NULL 
+    ),
+    districts AS (SELECT 
+                id_zone,
+                ifnull(TRIM(br.name_districts), 'external') AS name_zone,
+                br.zone_type,
+                CASE  -- comprueba si el codigo viene de fuera de españa en caso lo pone como EXT
+                    WHEN br.id_districts LIKE 'FR%' 
+                    OR br.id_districts LIKE 'PT%' 
+                    OR br.id_districts LIKE 'IT%' 
+                    OR br.id_districts LIKE 'DE%' 
+                    OR br.id_districts LIKE 'UK%' 
+                    OR br.id_districts LIKE 'US%'
+                    OR br.id_districts LIKE 'EXT%'
+                    THEN 'EXT'
+                    ELSE 'ESP'
+                END AS country_zone,
+                geometry,
+                centroid,
+                ST_PointOnSurface(br.geometry) AS visual_point,
+            FROM bronze.districts_info br
+            LEFT JOIN silver.dim_zones d
+            ON br.id_districts = d.original_id AND br.zone_type = d.zone_type AND d.source = 'mitma' 
+            WHERE id_districts != 'NA' AND id_districts IS NOT NULL 
+    )
+
+    SELECT * FROM  gaus
+    UNION ALL 
+    SELECT * FROM  municiples
+    UNION ALL 
+    SELECT * FROM  districts
+
+
+    """
+    con.sql(f"CREATE OR REPLACE TABLE silver.zones_info AS(SELECT *, current_timestamp as ingestion_date FROM ({q})) ")
 
 
 def load_zone_pairs(con, zone_type):
@@ -183,10 +370,10 @@ def load_zone_pairs(con, zone_type):
     pairs_query=f"""--sql
                     WITH base AS (
                             SELECT
-                                '{zone_type}' AS zone_type,
-                                TRIM(id_zone)   AS id_zone,
+                                zone_type,
+                                id_zone,
                                 centroid
-                            FROM silver.{zone_type}_zone WHERE country_zone = 'ESP' --solo nos interesan zonas dentro de españa 
+                            FROM silver.zones_info WHERE country_zone = 'ESP' AND zone_type = '{zone_type}'--solo nos interesan zonas dentro de españa 
                                 )
                         
                         SELECT
@@ -245,11 +432,11 @@ def population_check(con):
     query_transformacion = f"""--sql
     WITH raw_unpivoted AS (
         SELECT 
-            ine_section, -- Usamos Sección Censal como ID
+            id_zone, -- Usamos Sección Censal como ID
             name,
             UNNEST({sql_year_label_list})::INT as year,
             UNNEST({sql_col_list})::DOUBLE as population_raw
-        FROM {table_name}
+        FROM {table_name} br LEFT JOIN silver.dim_zones d ON br.ine_section = d.original_id AND d.source = 'ine' AND d.zone_type = 'sections'
     ),
     calc_imputation AS (
         SELECT 
@@ -260,12 +447,12 @@ def population_check(con):
                 
                 -- Si falta dato, coge el del año anterior
                 LAST_VALUE(population_raw IGNORE NULLS) 
-                    OVER(PARTITION BY ine_section ORDER BY year 
+                    OVER(PARTITION BY id_zone ORDER BY year 
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
                 
                 --  Si es el primer año y falta, coge el del siguiente
                 FIRST_VALUE(population_raw IGNORE NULLS) 
-                    OVER(PARTITION BY ine_section ORDER BY year 
+                    OVER(PARTITION BY id_zone ORDER BY year 
                         ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING),
                 
                 -- Si todo es nulo, asume 0 habitantes
@@ -279,8 +466,8 @@ def population_check(con):
         SELECT 
             *,
             -- Variación Interanual
-            (population - LAG(population) OVER(PARTITION BY ine_section ORDER BY year)) / 
-            NULLIF(LAG(population) OVER(PARTITION BY ine_section ORDER BY year), 0) as pct_change,
+            (population - LAG(population) OVER(PARTITION BY id_zone ORDER BY year)) / 
+            NULLIF(LAG(population) OVER(PARTITION BY id_zone ORDER BY year), 0) as pct_change,
             
             -- Z-Score (Comparación con el resto de secciones ese año)
             (population - AVG(population) OVER(PARTITION BY year)) / 
@@ -326,11 +513,11 @@ def average_rent_check(con):
     query_transformacion = f"""--sql
     WITH raw_unpivoted AS (
         SELECT 
-            ine_district,
+            id_zone,
             name,
             UNNEST({sql_year_label_list})::INT as year,
             UNNEST({sql_col_list})::DOUBLE as rent_raw
-        FROM {table_name}
+        FROM {table_name} br LEFT JOIN silver.dim_zones d ON br.ine_district = d.original_id AND d.source = 'ine' AND d.zone_type = 'districts'
     ),
     calc_imputation AS (
         SELECT 
@@ -338,10 +525,10 @@ def average_rent_check(con):
             COALESCE(
                 rent_raw, 
                 LAST_VALUE(rent_raw IGNORE NULLS) 
-                    OVER(PARTITION BY ine_district ORDER BY year 
+                    OVER(PARTITION BY id_zone ORDER BY year 
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
                 FIRST_VALUE(rent_raw IGNORE NULLS) 
-                    OVER(PARTITION BY ine_district ORDER BY year 
+                    OVER(PARTITION BY id_zone ORDER BY year 
                         ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING),
                 0
             ) as rent,
@@ -352,8 +539,8 @@ def average_rent_check(con):
         SELECT 
             *,
             -- Cálculo de variación (Change)
-            (rent - LAG(rent) OVER(PARTITION BY ine_district ORDER BY year)) / 
-            NULLIF(LAG(rent) OVER(PARTITION BY ine_district ORDER BY year), 0) as pct_change,
+            (rent - LAG(rent) OVER(PARTITION BY id_zone ORDER BY year)) / 
+            NULLIF(LAG(rent) OVER(PARTITION BY id_zone ORDER BY year), 0) as pct_change,
             
             -- Cálculo de Z-Score
             (rent - AVG(rent) OVER(PARTITION BY year)) / 
@@ -371,7 +558,7 @@ def average_rent_check(con):
             ELSE FALSE 
         END as is_atypical
     FROM stats_calc
-    ORDER BY ine_district, year
+    --ORDER BY ine_district, year
     """
 
     con.sql(f"CREATE OR REPLACE TABLE {target_table} AS {query_transformacion}")
@@ -384,8 +571,8 @@ def check_trips_quality(con):
     con.sql("""
         -- Cuántas filas tengo y qué fechas cubro
         SELECT
-            MIN(trip_date) AS min_date,
-            MAX(trip_date) AS max_date,
+            MIN(date) AS min_date,
+            MAX(date) AS max_date,
             COUNT(*)       AS num_rows
         FROM silver.od_trips;
 
@@ -487,17 +674,19 @@ if __name__ == "__main__":
                 INSTALL spatial; LOAD spatial;
     """)
     con.sql(f"""
-            ATTACH 'ducklake:mobility_ducklake.ducklake' AS my_ducklake;
+            ATTACH 'ducklake:mobility.ducklake' AS my_ducklake;
             USE my_ducklake;
             CREATE SCHEMA IF NOT EXISTS silver;
                 """)
-    map_gaus(con)
+    create_master_zones(con)
+    update_master_zones(con)
+
     load_silver_ine_mitma_zones(con)
-    #con.sql("DROP TABLE silver.od_trips")
+    con.sql("DROP TABLE silver.od_trips")
     load_silver_trips(con, 2023, month= 6,zone_type="Distritos")
     load_silver_trips(con, 2023, month= 6,zone_type="GAU")
-    load_silver_zone(con,zone_type="districts")
-    load_silver_zone(con,zone_type="gaus")
+    load_silver_trips(con, 2023, month= 6,zone_type="Municipios")
+    load_silver_zone(con)
     load_zone_pairs(con, zone_type="districts")
     load_zone_pairs(con, zone_type="gaus")
 

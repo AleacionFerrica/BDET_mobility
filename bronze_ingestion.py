@@ -295,7 +295,7 @@ def load_ine_mitma_zone_relation():
     #print(publication_date)
     urls = file_info["source_url"].tolist()
     urls_sql_list = str(urls).replace('[', '').replace(']', '')
-    #print(urls_sql_list)
+    print(urls_sql_list)
     source_query = f"""--sql
                 SELECT 
                     *,
@@ -415,10 +415,10 @@ def parse_population_ine():
 
     # TABLA DE POBLACION
 
-    TABLE_ID = "65031"  # 65031 total, albacete : 69095
+    TABLE_ID = "66595"  # 65031 total, albacete : 69095
     URL = f"https://servicios.ine.es/wstempus/js/es/DATOS_TABLA/{TABLE_ID}?tip=AM"
 
-
+    print (f"Parsing population data from {URL}")
     # 2. Hacemos la petición
     try:
         # request json file of the table 
@@ -430,73 +430,67 @@ def parse_population_ine():
         for entrada in response.json():
             metadata = entrada.get("MetaData", [])
             
-            # --- 1. FILTRO: Solo Secciones ---
+            # --- Variables de control (Flags) ---
             es_seccion = False
-            codigo_seccion = ""
-            nombre_seccion = ""
+            codigo_seccion = None
+            nombre_seccion = None
             
-            for meta in metadata:
-                if meta.get("T3_Variable") == "Secciones":
-                    es_seccion = True
-                    codigo_seccion = meta.get("Codigo")
-                    nombre_seccion = meta.get("Nombre")
-                    break
-            
-            if not es_seccion:
-                continue # Saltamos si es Municipio, Provincia, etc.
-
-            # --- 2. FILTRO: Solo 'Total' (Sin distinción de género) ---
+            es_total_actividad = False
+            es_total_pais = False
             es_total_sexo = False
-            for meta in metadata:
-                if meta.get("T3_Variable") == "Sexo":
-                    if meta.get("Nombre") == "Total":
-                        es_total_sexo = True
-                    break
             
-            if not es_total_sexo:
-                continue # Saltamos si es "Hombres" o "Mujeres"
-
-            # --- 3. DEFINIR CONCEPTO (¿Es población Total, Española o Extranjera?) ---
-            # Buscamos la variable "Países" o "Nacionalidad" para limpiar el nombre
-            es_total_nacion = False
-            concepto = "poblacion_total" # Valor por defecto
+            # --- Iterar metadatos para verificar filtros ---
             for meta in metadata:
-                # print(meta.get("T3_Variable"))
-                if meta.get("T3_Variable") in ["Países","Nacionalidad"]:
-                    if meta.get("Nombre") == "Total":
-                        es_total_nacion = True
+                variable = meta.get("T3_Variable")
+                nombre = meta.get("Nombre") # Ejemplo: "Total", "Ocupado/a", "Extranjero"
+                
+                # 1. Filtro Geográfico: Solo Secciones
+                if variable == "Secciones":
+                    es_seccion = True
+                    codigo_seccion = meta.get("Codigo") # Ejemplo: 0100101001
+                    nombre_seccion = meta.get("Nombre")
 
-            if not es_total_nacion :
-                continue
+                # 2. Filtro Actividad: Debe ser "Total" (para excluir "Ocupados", "Estudiantes")
+                elif variable == "Relación con la actividad" and nombre == "Total":
+                    es_total_actividad = True
+                    
+                # 3. Filtro Nacionalidad: Debe ser "Total" (para excluir "Española", "Extranjera")
+                elif variable in ["Países", "Nacionalidad"] and nombre == "Total":
+                    es_total_pais = True
 
-            # --- 4. EXTRACCIÓN DE DATOS ---
-            for dato in entrada.get("Data", []):
-                anyo = dato.get("Anyo")
-                if anyo: # Asegurar que existe el año
-                    if 2021 <= anyo <=2024:
+                # 4. Filtro Sexo: Debe ser "Total"
+                elif variable == "Sexo" and nombre == "Total":
+                    es_total_sexo = True
+
+            # --- Decisión de Guardado ---
+            # Solo procesamos si es una Sección Y además es el TOTAL de todas las categorías
+            if es_seccion and es_total_actividad and es_total_pais and es_total_sexo:
+                
+                for dato in entrada.get("Data", []):
+                    # Filtro de años opcional (ej. 2021-2024)
+                    anyo = dato.get("Anyo")
+                    if 2021 <= anyo <= 2024: 
                         resultados.append({
                             "ine_section": codigo_seccion,
                             "name": nombre_seccion,
-                            "concept": concepto,
+                            "concept": "poblacion_total", # Según tu JSON es pob > 16 años
                             "year": f"{anyo}_value",
                             "total_population": dato.get("Valor"),
                             "source_url": URL
                         })
 
-        # --- CREACIÓN DE TABLA PIVOTADA ---
+        # Convertir a DataFrame y Pivotar
         if resultados:
             df = pd.DataFrame(resultados)
             
-            # Pivotamos para poner los años en columnas
+            # Pivotamos para que los años sean columnas (formato wide)
             df_pivot = df.pivot_table(
-                index=['ine_section', 'name', 'concept',"source_url"], 
-                columns='year', 
+                index=['ine_section', 'name', 'concept', 'source_url'],
+                columns='year',
                 values='total_population'
             ).reset_index()
-            
-            # Quitamos el nombre del eje de columnas para que quede limpio
+            print(f" Parsed {len(df_pivot)} rows from INE Poblacion Total" )
             df_pivot.columns.name = None
-            print(f" Parsed {len(df_pivot)} rows from INE {concepto}" )
             return df_pivot
         else:
             print("Population data not found.")
@@ -538,7 +532,7 @@ if __name__ == "__main__":
                 INSTALL spatial; LOAD spatial;
     """)
     con.sql(f"""
-            ATTACH 'ducklake:mobility_ducklake.ducklake' AS my_ducklake;
+            ATTACH 'ducklake:mobility.ducklake' AS my_ducklake;
             USE my_ducklake;
             CREATE SCHEMA IF NOT EXISTS bronze;
                 """)
@@ -558,27 +552,27 @@ if __name__ == "__main__":
             )
         """)
 
-
-    load_trips(con, year=2023, zone="GAU", month=6)
+    # load_trips(con, year=2023, zone="Distritos", month=6)
+    # load_trips(con, year=2023, zone="GAU", month=6)
     
-    # con.sql("DROP TABLE bronze.districts_info ")
-    # con.sql("DROP TABLE bronze.municiples_info ")
-    # con.sql("DROP TABLE bronze.gaus_info ")
+    # # con.sql("DROP TABLE bronze.districts_info ")
+    # # con.sql("DROP TABLE bronze.municiples_info ")
+    # # con.sql("DROP TABLE bronze.gaus_info ")
 
-    # # LOAD zones info
+    # # # LOAD zones info
     # load_zone_info(con,zone="distritos")
     # load_zone_info(con,zone="municipios")
     # load_zone_info(con,zone="gaus")
 
 
-    df_rent = parse_rent_ine()
+    # df_rent = parse_rent_ine()
     
 
     df_pop = parse_population_ine()
     # print(df_pop[2023].sum())
     #print(df_pop)
     
-    load_ine_data(df_rent)
+    # load_ine_data(df_rent)
     load_ine_data(df_pop)
     #print(len(con.sql("SELECT * FROM bronze.poblacion_total --WHERE ine_section LIKE '02%' ").df()))
 

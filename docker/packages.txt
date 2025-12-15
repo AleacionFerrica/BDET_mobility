@@ -1,0 +1,7 @@
+# Herramientas básicas de compilación (a veces necesarias para instalar extensiones)
+build-essential
+# Librerías para manejo de geometrías (GDAL es el motor bajo el capó de lo espacial)
+libgdal-dev
+# Utilidades varias
+unzip
+wget
