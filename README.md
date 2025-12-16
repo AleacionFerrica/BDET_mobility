@@ -1,7 +1,7 @@
 ## Arquitectura de Datos
 
 ### Diagrama Bronze
-![Diagrama Bronze](bronze_diagram.png)
+![Diagrama Bronze](docs/esq_bronze.png)
 
 ### Diagrama Silver
-![Diagrama Silver](silver_diagram.png)
+![Diagrama Silver](docs/esq_silver.png)
