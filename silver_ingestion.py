@@ -77,6 +77,11 @@ def update_master_zones(con):
             UNION ALL
             SELECT TRIM(seccion_ine) as original_id, 'sections' as zone_type, 'ine' as source FROM ine_mitma_zones
 
+            UNION ALL
+            SELECT TRIM(ine_district) as original_id, 'districts' as zone_type, 'ine' as source FROM bronze.renta_media
+            UNION ALL
+            SELECT TRIM(ine_section) as original_id, 'sections' as zone_type, 'ine' as source FROM bronze.poblacion_total
+
         ),
         distinct_candidates AS (
             SELECT DISTINCT original_id,  zone_type, source FROM all_codes WHERE original_id IS NOT NULL
@@ -409,7 +414,7 @@ def population_check(con):
         SUM("2021_value") as total_2021, 
         SUM("2022_value") as total_2022, 
         SUM("2023_value") as total_2023, 
-        SUM("2024_value") as total_2024, 
+
         
         
         FROM bronze.poblacion_total """)
@@ -433,7 +438,7 @@ def population_check(con):
     WITH raw_unpivoted AS (
         SELECT 
             id_zone, -- Usamos Sección Censal como ID
-            name,
+            section_name,
             UNNEST({sql_year_label_list})::INT as year,
             UNNEST({sql_col_list})::DOUBLE as population_raw
         FROM {table_name} br LEFT JOIN silver.dim_zones d ON br.ine_section = d.original_id AND d.source = 'ine' AND d.zone_type = 'sections'

@@ -565,18 +565,18 @@ if __name__ == "__main__":
     # load_zone_info(con,zone="gaus")
 
 
-    # df_rent = parse_rent_ine()
+    df_rent = parse_rent_ine()
     
 
-    df_pop = parse_population_ine()
+    #df_pop = parse_population_ine()
     # print(df_pop[2023].sum())
     #print(df_pop)
     
-    # load_ine_data(df_rent)
-    load_ine_data(df_pop)
+    load_ine_data(df_rent)
+    #load_ine_data(df_pop)
     #print(len(con.sql("SELECT * FROM bronze.poblacion_total --WHERE ine_section LIKE '02%' ").df()))
 
-    load_ine_mitma_zone_relation()
+    #load_ine_mitma_zone_relation()
 
     #con.sql("SELECT * FROM bronze.renta_media -- WHERE seccion_ine LIKE '02%' ").show()
     

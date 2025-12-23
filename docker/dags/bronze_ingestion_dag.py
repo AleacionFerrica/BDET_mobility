@@ -1,5 +1,5 @@
 from airflow.sdk import Asset, dag, task
-
+from airflow.sdk.bases.hook import BaseHook
 import duckdb
 import pandas as pd
 import requests
@@ -14,14 +14,49 @@ from pathlib import Path
 # En Astro/Docker, 'include' suele usarse para archivos persistentes o datos locales
 AIRFLOW_HOME = os.getenv("AIRFLOW_HOME", "/usr/local/airflow")
 DB_PATH = "include/mobility.ducklake"
-
+pg = BaseHook.get_connection("neon_postgres")
+aws = BaseHook.get_connection("aws_default")
 # Función auxiliar para conectar a DuckDB con las extensiones necesarias
 def get_db_connection():
+    pg = BaseHook.get_connection("neon_postgres")
+    aws = BaseHook.get_connection("aws_default")
     con = duckdb.connect( )
     con.sql("INSTALL ducklake; LOAD ducklake;")
     con.sql("INSTALL spatial; LOAD spatial;")
-    con.sql(f"ATTACH '{DB_PATH}' AS my_ducklake;")
-    con.sql("USE my_ducklake;")
+    con.execute("INSTALL httpfs; LOAD httpfs;")
+    con.sql("INSTALL postgres; LOAD postgres;")
+
+    con.execute(f"""
+        CREATE OR REPLACE SECRET secreto_s3 (
+        TYPE s3,
+        KEY_ID '{aws.login}',
+        SECRET '{aws.password}',
+        REGION 'eu-central-1'
+    )
+    """)
+
+    con.execute(f"""
+        CREATE OR REPLACE SECRET secreto_postgres (
+        TYPE postgres,
+        HOST '{pg.host}',
+        PORT {pg.port},
+        DATABASE '{pg.schema}',
+        USER '{pg.login}',
+        PASSWORD '{pg.password}'
+        )
+    """)
+    con.execute("""
+        CREATE OR REPLACE SECRET secreto_ducklake (
+            TYPE ducklake,
+            METADATA_PATH '',
+            METADATA_PARAMETERS MAP {'TYPE': 'postgres', 'SECRET': 'secreto_postgres'}
+        );
+        """)
+    con.execute("""
+        ATTACH 'ducklake:secreto_ducklake' AS mobility_ducklake (DATA_PATH 's3://narfi-s3-ducklake') """)
+    con.execute("""
+        USE mobility_ducklake """)
+
     
     return con
 
@@ -45,7 +80,7 @@ def mobility_dag():
         con = get_db_connection()
         con.sql("CREATE SCHEMA IF NOT EXISTS bronze;")
         con.close()
-        print(f"Base de datos inicializada en {DB_PATH}")
+
 
     @task()
     def ingest_catalog():
@@ -175,22 +210,36 @@ def mobility_dag():
             con.close()
             
     @task()
-    def get_trips_urls(year: int, month: int, zones: list):
+    def get_trips_urls(year: int, zones: list, month=None):
         con= get_db_connection()
         print(f"Procesando Viajes: Año {year}, Mes {month}, Zona {zones}")
         urls_to_process = []
         try :
             for zone in zones:
                  
-                urls_query = f"""
+                urls_query = f"""--sql
                     SELECT source_url 
                     FROM bronze.catalog 
-                    WHERE year = {year} AND month = {month}
-                    AND zone_type = '{zone}' AND main_category = 'Estudios Basicos'
-                    AND study_type = 'Viajes' AND filename LIKE '%.csv.gz'
+                    WHERE year = {year} 
+                    -- AND month = {month}
+                    AND zone_type = '{zone}' 
+                    AND main_category = 'Estudios Basicos'
+                    AND study_type = 'Viajes' 
+                    AND filename LIKE '%.csv.gz'
                 """
+                if month is None: pass # no month chosen load whole year
+
+                elif isinstance(month, int):
+                    urls_query += f" AND month = {month}"
+                    
+                elif isinstance(month, (list, tuple, range)):
+                    months_str = ",".join(map(str, month))
+                    urls_query += f" AND month IN ({months_str})"
+
+                #files_df = con.sql(urls_query).df()
+
                 results = con.sql(urls_query).fetchall()
-                subset_results = results[-3:]
+                subset_results = results[-7:]
 
                 for row in subset_results:
                     url = row[0]
@@ -293,6 +342,7 @@ def mobility_dag():
                 
                 # Definir rutas locales dentro del temp dir
                 shp_path = os.path.join(tmp_dir, f"zonificacion_{zone}.shp")
+                shp_centroid_path = os.path.join(tmp_dir, f"zonificacion_{zone}_centroides.shp")
                 csv_path = os.path.join(tmp_dir, f"nombres_{zone}.csv")
                 
                 # Verificar existencia
@@ -313,13 +363,16 @@ def mobility_dag():
                         'mitma' as source,
                         '{main_source_url}' as source_url,      
                         current_timestamp as ingestion_date,
-                        t1.geom as geometry
+                        t1.geom as geometry,
+                        t3.geom as centroid
                     FROM st_read('{shp_path}') t1
                     LEFT JOIN read_csv('{csv_path}', delim='|', header=True, auto_detect=True) t2 
                     ON CAST(t1.ID AS VARCHAR) = CAST(t2.ID AS VARCHAR)
+                LEFT JOIN st_read('{shp_centroid_path}') t3 ON CAST(t1.ID AS VARCHAR) = CAST(t3.ID AS VARCHAR)
                 """
                 try:
                     con.begin()
+                    con.sql(f"DROP TABLE {target_table}")
                     con.sql(f"CREATE TABLE IF NOT EXISTS {target_table} AS {source_query} LIMIT 0")
 
                     # Insertar solo nuevos (lógica simplificada)
@@ -333,35 +386,14 @@ def mobility_dag():
                     
                     """)
                     con.commit()
-                    con.sql(f"SELECT count(*) as inserted_rows FROM {target_table}").show()
+                    con.sql(f"SELECT count(*) as inserted_rows FROM {target_table};").show()
                 except Exception as e:
                     con.rollback()
                     print(f"Error processing {url}: {e}")
                     raise e
         con.close()
 
-    @task()
-    def ingest_ine_data():
-        """Ingesta de datos de Renta y Población del INE"""
-        
-        # --- PARTE 1: RENTA ---
-        # (Tu lógica parse_rent_ine)
-        # ... Aquí pondrías la llamada a la API y el parseo a DataFrame ...
-        # Por brevedad, asumiremos que parse_rent_ine devuelve un DF
-        # df_rent = parse_rent_ine() ...
-        
-        # Simulación simple para que compile el ejemplo:
-        print("Ingestando Renta INE...")
-        # (Añade tu lógica parse_rent_ine aquí dentro)
-        
-        # --- PARTE 2: POBLACION ---
-        print("Ingestando Población INE...")
-        # (Añade tu lógica parse_population_ine aquí dentro)
-        
-        # Una vez tengas df_rent y df_pop, conecta y carga
-        con = get_db_connection()
-        # load_ine_data(con, df_rent) ...
-        con.close()
+
 
     @task()
     def ingest_relations():
@@ -399,7 +431,7 @@ def mobility_dag():
                                 """
         try:
             con.begin()
-            con.sql("DROP TABLE bronze.ine_mitma_zones ")
+
             con.sql(f"""
                 CREATE TABLE IF NOT EXISTS  bronze.ine_mitma_zones AS
                 {source_query} LIMIT 0;
@@ -418,6 +450,7 @@ def mobility_dag():
                         WHEN NOT MATCHED THEN
                             INSERT BY NAME;
                         """)
+            con.sql(f"SELECT count(*) as inserted_rows FROM bronze.ine_mitma_zones").show()
             con.commit()
         except Exception as e:
                     con.rollback()
@@ -429,7 +462,7 @@ def mobility_dag():
     @task()
     def parse_rent_ine():
 
-        TABLE_ID = "30656"  # 30824 total albacete : 30656
+        TABLE_ID = "30824"  # 30824 total albacete : 30656
         URL = f"https://servicios.ine.es/wstempus/js/es/DATOS_TABLA/{TABLE_ID}?tip=AM"
 
 
@@ -495,7 +528,7 @@ def mobility_dag():
 
                         ).reset_index()
                 print(f" Parsed {len(df_pivot)} rows from INE {concepto}" )
-                return df_pivot
+
             else:
                 print("Rent data not found.")
         except Exception as e:
@@ -507,11 +540,11 @@ def mobility_dag():
             pass
         table_name = df_pivot["concept"][0]
         #print(f"bronze.{table_name}")
-
+        
         try:
             con = get_db_connection()
             con.begin()
-            con.sql(f"CREATE TABLE IF NOT EXISTS bronze.{table_name} AS SELECT *,current_timestamp as ingestion_date FROM df LIMIT 0;")
+            con.sql(f"CREATE TABLE IF NOT EXISTS bronze.{table_name} AS SELECT *,current_timestamp as ingestion_date FROM df_pivot LIMIT 0;")
             for colname in df_pivot.columns.tolist():
                     if colname.startswith("ine_"):
                         ine_id = colname
@@ -522,19 +555,17 @@ def mobility_dag():
             #con.sql(f"DESCRIBE TABLE bronze.{table_name}").show()
             con.sql(f"""
                     MERGE INTO bronze.{table_name} AS target
-                    USING df_pivot as 
-                    (SELECT *, 
-                    current_timestamp as ingestion_date
-                    FROM df_pivot AS sc
+                    USING (SELECT *, 
+                                current_timestamp as ingestion_date
+                                FROM df_pivot) AS sc
                     ON target.{ine_id} = sc.{ine_id}
                     AND target.concept = sc.concept
-                    AND existing.name = new_data.name
+                    AND target.name = sc.name
                     WHEN NOT MATCHED THEN
                         INSERT BY NAME;
-    
-                    ));
+
                 """)
-                
+            con.commit()    
         except Exception as e:
                     con.rollback()
                     print(f"Error processing {table_name}: {e}")
@@ -547,7 +578,7 @@ def mobility_dag():
 
         # TABLA DE POBLACION
 
-        TABLE_ID = "66595"  # 65031 total, albacete : 69095
+        TABLE_ID = "66595"  # 66595 total, albacete : 69095
         URL = f"https://servicios.ine.es/wstempus/js/es/DATOS_TABLA/{TABLE_ID}?tip=AM"
 
         print (f"Parsing population data from {URL}")
@@ -638,7 +669,7 @@ def mobility_dag():
         try:
             con = get_db_connection()
             con.begin()
-            con.sql(f"CREATE TABLE IF NOT EXISTS bronze.{table_name} AS SELECT *,current_timestamp as ingestion_date FROM df LIMIT 0;")
+            con.sql(f"CREATE TABLE IF NOT EXISTS bronze.{table_name} AS SELECT *,current_timestamp as ingestion_date FROM df_pivot LIMIT 0;")
             for colname in df_pivot.columns.tolist():
                     if colname.startswith("ine_"):
                         ine_id = colname
@@ -646,21 +677,21 @@ def mobility_dag():
 
                 # loop para meter todas las columnas del dataframe, en caso de actualizacion de datos del ine (2025) se añadiran estos datos sin error
 
-            #con.sql(f"DESCRIBE TABLE bronze.{table_name}").show()
+            # con.sql(f"DESCRIBE TABLE bronze.{table_name}").show()
             con.sql(f"""
                     MERGE INTO bronze.{table_name} AS target
-                    USING df_pivot as 
-                    (SELECT *, 
-                    current_timestamp as ingestion_date
-                    FROM df_pivot AS sc
-                    ON target.{ine_id} = sc.{ine_id}
+                    USING (SELECT *, 
+                        current_timestamp as ingestion_date
+                        FROM df_pivot) AS sc
+                    ON target.ine_section = sc.ine_section
                     AND target.concept = sc.concept
-                    AND existing.name = new_data.name
+                    AND sc.name = sc.name
                     WHEN NOT MATCHED THEN
                         INSERT BY NAME;
 
                     
                 """)
+            con.commit()
         except Exception as e:
                     con.rollback()
                     print(f"Error processing {table_name}: {e}")
@@ -680,28 +711,28 @@ def mobility_dag():
     
     # 3. Una vez tenemos catálogo, podemos lanzar procesos en paralelo
     # Viajes (Trips)
-    #task_urls = get_trips_urls(year=2023, month=6, zones=["Distritos","Municipios", "GAU"])
-    #task_trips = ingest_trips.expand(file_info=task_urls)
+    task_urls = get_trips_urls(year=2023, month=6, zones=["Distritos","Municipios", "GAU"])
+    task_trips = ingest_trips.expand(file_info=task_urls)
     # Geometrías
-    #task_zones = ingest_zone_geometries(zone_list=["distritos", "municipios", "gaus"])
+    task_zones = ingest_zone_geometries(zone_list=["distritos", "municipios", "gaus"])
     
     # Relaciones
     task_rel = ingest_relations()
     
     # INE (Independiente del catálogo de MITMA, pero depende de init)
     task_ine_rent = parse_rent_ine()
-    #task_ine_population = parse_population_ine()
+    task_ine_population = parse_population_ine()
 
     # Orquestación (Dependencias)
     task_init >> task_catalog
     
-    # task_catalog >> task_urls
-    # task_urls >> task_trips
-    # task_catalog >> task_zones
+    task_catalog >> task_urls
+    task_urls >> task_trips
+    task_catalog >> task_zones
     task_catalog >> task_rel
     
     task_init >> task_ine_rent
-    # task_init >> task_ine_population
+    task_init >> task_ine_population
 
 # Instanciamos el DAG
 mobility_ingestion = mobility_dag()
