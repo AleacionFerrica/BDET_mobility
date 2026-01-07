@@ -688,9 +688,9 @@ if __name__ == "__main__":
 
     load_silver_ine_mitma_zones(con)
     con.sql("DROP TABLE silver.od_trips")
-    load_silver_trips(con, 2023, month= 6,zone_type="Distritos")
-    load_silver_trips(con, 2023, month= 6,zone_type="GAU")
-    load_silver_trips(con, 2023, month= 6,zone_type="Municipios")
+    load_silver_trips(con, 2023,zone_type="Distritos")
+    load_silver_trips(con, 2023,zone_type="GAU")
+    load_silver_trips(con, 2023,zone_type="Municipios")
     load_silver_zone(con)
     load_zone_pairs(con, zone_type="districts")
     load_zone_pairs(con, zone_type="gaus")

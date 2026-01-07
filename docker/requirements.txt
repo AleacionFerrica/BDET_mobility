@@ -4,3 +4,6 @@ pandas
 requests
 geopandas
 pyarrow
+apache-airflow-providers-amazon
+numpy
+scikit-learn

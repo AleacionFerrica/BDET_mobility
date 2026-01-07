@@ -53,7 +53,7 @@ def get_db_connection():
         );
         """)
     con.execute("""
-        ATTACH 'ducklake:secreto_ducklake' AS mobility_ducklake (DATA_PATH 's3://narfi-s3-ducklake') """)
+        ATTACH 'ducklake:secreto_ducklake' AS mobility_ducklake (DATA_PATH 's3://yena-s3-ducklake') """)
     con.execute("""
         USE mobility_ducklake """)
 
@@ -239,7 +239,7 @@ def mobility_dag():
                 #files_df = con.sql(urls_query).df()
 
                 results = con.sql(urls_query).fetchall()
-                subset_results = results[-7:]
+                subset_results = results[:]
 
                 for row in subset_results:
                     url = row[0]
@@ -262,12 +262,14 @@ def mobility_dag():
         con = get_db_connection()
         try: 
             source_query = f"""
-                SELECT *, '{zone}' as zone_type, current_timestamp as ingestion_date
+                SELECT *, '{zone}' as zone_type, current_timestamp as ingestion_date, try_strptime(fecha::VARCHAR || LPAD(periodo::VARCHAR, 2, '0'), '%Y%m%d%H') as date
                 FROM read_csv('{url}', header=True, filename=True, union_by_name=True, null_padding=True, ignore_errors=True, all_varchar=True)
             """
             con.execute("BEGIN TRANSACTION;")
-            
+
+
             con.sql(f"CREATE TABLE IF NOT EXISTS bronze.trips AS {source_query} LIMIT 0;")
+            con.sql("ALTER TABLE bronze.trips SET PARTITIONED BY (zone_type, YEAR(date), MONTH(date) );")
             # con.sql(f"""
             #         MERGE INTO  bronze.trips AS target
             #         USING ({source_query}) AS source
@@ -372,7 +374,7 @@ def mobility_dag():
                 """
                 try:
                     con.begin()
-                    con.sql(f"DROP TABLE {target_table}")
+                    #con.sql(f"DROP TABLE {target_table}")
                     con.sql(f"CREATE TABLE IF NOT EXISTS {target_table} AS {source_query} LIMIT 0")
 
                     # Insertar solo nuevos (lógica simplificada)
@@ -711,7 +713,7 @@ def mobility_dag():
     
     # 3. Una vez tenemos catálogo, podemos lanzar procesos en paralelo
     # Viajes (Trips)
-    task_urls = get_trips_urls(year=2023, month=6, zones=["Distritos","Municipios", "GAU"])
+    task_urls = get_trips_urls(year=2023, month=5, zones=["Distritos","Municipios", "GAU"])
     task_trips = ingest_trips.expand(file_info=task_urls)
     # Geometrías
     task_zones = ingest_zone_geometries(zone_list=["distritos", "municipios", "gaus"])

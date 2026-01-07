@@ -9,7 +9,8 @@ import os
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import re
-
+pg = BaseHook.get_connection("neon_postgres")
+aws = BaseHook.get_connection("aws_default")
 AIRFLOW_HOME = os.getenv("AIRFLOW_HOME", "/usr/local/airflow")
 DB_PATH = "include/mobility.ducklake"
 
@@ -23,8 +24,7 @@ def get_db_connection():
     
     return con
 def get_db_connection():
-    pg = BaseHook.get_connection("neon_postgres")
-    aws = BaseHook.get_connection("aws_default")
+
     con = duckdb.connect( )
     con.sql("INSTALL ducklake; LOAD ducklake;")
     con.sql("INSTALL spatial; LOAD spatial;")
@@ -38,6 +38,17 @@ def get_db_connection():
         SECRET '{aws.password}',
         REGION 'eu-central-1'
     )
+    """)
+    
+    con.execute(f"""
+        CREATE OR REPLACE SECRET secreto_postgres (
+        TYPE postgres,
+        HOST '{pg.host}',
+        PORT {pg.port},
+        DATABASE '{pg.schema}',
+        USER '{pg.login}',
+        PASSWORD '{pg.password}'
+        )
     """)
 
     con.execute(f"""
@@ -58,7 +69,7 @@ def get_db_connection():
         );
         """)
     con.execute("""
-        ATTACH 'ducklake:secreto_ducklake' AS mobility_ducklake (DATA_PATH 's3://narfi-s3-ducklake') """)
+        ATTACH 'ducklake:secreto_ducklake' AS mobility_ducklake (DATA_PATH 's3://yena-s3-ducklake') """)
     con.execute("""
         USE mobility_ducklake """)
 
@@ -233,6 +244,7 @@ def silver_mobility_dag():
         con = get_db_connection()
         try: 
             con.begin()
+            #con.sql("DROP TABLE silver.od_trips")
             con.sql("""--sql
                 CREATE TABLE IF NOT EXISTS  silver.od_trips (
                     date TIMESTAMP,
@@ -241,15 +253,10 @@ def silver_mobility_dag():
                     -- od
                     id_origin VARCHAR,
                     id_destination VARCHAR,
-                    origin_activity VARCHAR,
-                    destination_activity VARCHAR,
+                    --origin_activity VARCHAR,
+                    --destination_activity VARCHAR,
                     
                     distance_group_km VARCHAR,
-                    residence_province VARCHAR,
-                    -- dem groups
-                    rent_group VARCHAR,
-                    age_group VARCHAR,
-                    sex_group VARCHAR,
 
                     --distance
                     n_trips DOUBLE,
@@ -271,93 +278,106 @@ def silver_mobility_dag():
             con.close()
 
     @task()
-    def load_silver_trips( year, zone_type, month=None):
-        print(f"Loading Silver for {zone_type} {year}/{month}/...")
+    def load_silver_trips( zone_type, year, month, day):
+        
         zone_dic = {"Municipios":"municiples","Distritos":"districts","GAU":"gaus"}
 
         
         
+        print(f"Loading Silver for {zone_type} {year}/{month}/{day}")
         query = f"""--sql
         --INSERT INTO silver.od_trips
         SELECT 
-                try_strptime(fecha::VARCHAR || LPAD(periodo::VARCHAR, 2, '0'), '%Y%m%d%H') as date,
+            -- Dimensiones (Agrupadores)
+            br.date as date,
 
-                CASE WHEN br.zone_type = 'Distritos' THEN 'distritcs' WHEN br.zone_type = 'Municipios' THEN 'municiples' 
-                    WHEN br.zone_type ='GAU' THEN 'gaus' END as zone_type,
+            CASE WHEN br.zone_type = 'Distritos' THEN 'districts' 
+                WHEN br.zone_type = 'Municipios' THEN 'municiples' 
+                WHEN br.zone_type ='GAU' THEN 'gaus' END as zone_type,
 
-                d_o.id_zone AS id_origin,
+            d_o.id_zone AS id_origin,
+            d_d.id_zone AS id_destination,
 
-                d_d.id_zone AS id_destination,
+            --CASE WHEN actividad_origen = 'casa' THEN 'Home' 
+               -- WHEN actividad_origen = 'trabajo_estudio' THEN 'Work_Study'  
+                --WHEN actividad_origen ='frecuente' THEN 'frequent'  
+               -- ELSE 'not_frequent' END as origin_activity,
 
+            --CASE WHEN actividad_destino = 'casa' THEN 'Home' 
+              --  WHEN actividad_destino = 'trabajo_estudio' THEN 'Work_Study'  
+              --  WHEN actividad_destino ='frecuente' THEN 'frequent'  
+               -- ELSE 'not_frequent' END as destination_activity,
+                
+            TRIM(TRY_CAST(distancia AS VARCHAR)) as distance_group_km,
+                
+            --SUBSTR(residencia, 1, 2) as residence_province,
 
-                CASE WHEN actividad_origen  = 'casa' THEN 'Home' WHEN actividad_origen  = 'trabajo_estudio' THEN 'Work_Study'  
-                    WHEN actividad_origen  ='frecuente' THEN 'frequent'  ELSE 'not_frequent' END as origin_activity,
+            -- (Aquí hemos eliminado renta, edad y sexo)
 
-                CASE WHEN actividad_destino  = 'casa' THEN 'Home' WHEN actividad_destino  = 'trabajo_estudio' THEN 'Work_Study'  
-                    WHEN actividad_destino  ='frecuente' THEN 'frequent'  ELSE 'not_frequent' END as destination_activity,
-                    
-                        -- distance,
-                TRIM(TRY_CAST(distancia AS VARCHAR)) as distance_group_km,
-                    
-                SUBSTR(residencia, 1, 2) as residence_province, --substring extracts first 2 characters starting from the first1 character
-                TRY_CAST(NULLIF(renta, 'NA') AS VARCHAR) as rent_group,
-                TRY_CAST(NULLIF(edad , 'NA')AS VARCHAR) as age_group ,
-                CASE WHEN sexo = 'hombre' THEN 'male' WHEN sexo = 'mujer' THEN 'female' ELSE 'NULL' END as sex_group,
+            --CASE WHEN estudio_origen_posible = 'no' THEN 'False' 
+            --    WHEN estudio_origen_posible = 'si' THEN 'True' END as origin_activity_std,
 
-                ROUND(TRY_CAST(viajes AS DOUBLE), 1) as n_trips, 
-                ROUND(TRY_CAST(viajes_km AS DOUBLE), 3) as trips_total_length_km,
+            --CASE WHEN estudio_destino_posible = 'no' THEN 'False' 
+            --    WHEN estudio_destino_posible = 'si' THEN 'True' END as destination_activity_std,
 
-                CASE WHEN estudio_origen_posible = 'no' THEN 'False' WHEN estudio_origen_posible = 'si' THEN 'True' END as origin_activity_std,
+            --  Métricas (Agregaciones)
+            ROUND(SUM(TRY_CAST(viajes AS DOUBLE)), 1) as n_trips, 
+            ROUND(SUM(TRY_CAST(viajes_km AS DOUBLE)), 2) as trips_total_length_km,
 
-                CASE WHEN estudio_destino_posible = 'no' THEN 'False' WHEN estudio_destino_posible = 'si' THEN 'True' END as destination_activity_std,
+            CURRENT_TIMESTAMP AS ingestion_date
 
-                CURRENT_TIMESTAMP AS ingestion_date
-
-            FROM bronze.trips br 
-            LEFT JOIN silver.dim_zones d_o
-                ON br.origen = d_o.original_id AND d_o.source = 'mitma' AND d_o.zone_type = '{zone_dic[zone_type]}'
-            LEFT JOIN silver.dim_zones d_d 
-                ON br.destino = d_d.original_id AND d_d.source = 'mitma' AND d_d.zone_type = '{zone_dic[zone_type]}'
-            WHERE 
-                --try_strptime(date::VARCHAR ), '%Y%m%d%H') as date 
-                YEAR(try_strptime(fecha::VARCHAR , '%Y%m%d')) = {year}
-                AND TRIM(br.zone_type) = '{zone_type}'
-                --AND MONTH(try_strptime(fecha::VARCHAR, '%Y%m%d')) = {month}
-        """
-        if month is None: pass # no month chosen load whole year
-
-        elif isinstance(month, int):
-            query += f" AND MONTH(try_strptime(fecha::VARCHAR, '%Y%m%d')) = {month}"
+        FROM bronze.trips br 
+        LEFT JOIN silver.dim_zones d_o
+            ON br.origen = d_o.original_id AND d_o.source = 'mitma' AND d_o.zone_type = '{zone_dic[zone_type]}'
+        LEFT JOIN silver.dim_zones d_d 
+            ON br.destino = d_d.original_id AND d_d.source = 'mitma' AND d_d.zone_type = '{zone_dic[zone_type]}'
+        WHERE 
+            YEAR(date) = {year}
+            AND TRIM(br.zone_type) = '{zone_type}'
+            AND MONTH(date) = {month}
+            AND DAY(date) = {day}
             
-        elif isinstance(month, (list, tuple, range)):
-            months_str = ",".join(map(str, month))
-            query += f" AND MONTH(try_strptime(fecha::VARCHAR, '%Y%m%d')) IN ({months_str})"
+        """
 
+        query += f" GROUP BY  1, 2, 3, 4, 5"
+
+            
+        #print(query)
+        con = get_db_connection()
+        #con.sql(query).show()
         try:
-            con = get_db_connection()
+
+            con.commit()
+        except Exception as e:
+            print(e)
+        try:
+            
+
             con.begin()
             # Borramos datos previos de esa partición para evitar duplicados
             del_q = f"""
                 DELETE FROM silver.od_trips
                 WHERE zone_type = '{zone_dic[zone_type]}'
                 AND YEAR(date) = {year}
-                --AND MONTH(date) = {month}
+                AND MONTH(date) = {month}
+                AND DAY(date) = {day}
             """
-            if isinstance(month, int):
-                del_q += f" AND MONTH(date) = {month}"
             
-            elif isinstance(month, (list, tuple, range)):
-                months_str = ",".join(map(str, month))
-                del_q += f" AND MONTH(date) IN ({months_str})"
             
             con.sql(del_q)
 
-            con.sql(f"""INSERT INTO silver.od_trips BY NAME {query} """)
-            con.sql(f"SELECT count(*)as inserted_rows FROM silver.ine_mitma_zones").show()
+            con.sql(f"""INSERT INTO silver.od_trips BY NAME {query} ;""")
+            check_q = f"""
+            SELECT count(*) as inserted_rows_check 
+            FROM silver.od_trips 
+            WHERE zone_type = '{zone_dic[zone_type]}' 
+            AND YEAR(date) = {year} AND MONTH(date) = {month} AND DAY(date) = {day}
+            """
+            con.sql(check_q).show()
             con.commit()
         except Exception as e:
-            con.execute("ROLLBACK;")
-            print(f"Error detectado: {e}. ROLLBACK")
+            con.rollback()
+            print(f"Error detectado en {zone_type}, {month}, {day}: {e}. ROLLBACK")
             raise e
         finally:
             con.close()
@@ -441,6 +461,8 @@ def silver_mobility_dag():
                 """)
             
             con.sql(f"SELECT count(*)as inserted_rows FROM silver.ine_mitma_zones").show()
+ 
+ 
             con.commit()
         except Exception as e:
             con.execute("ROLLBACK;")
@@ -915,7 +937,7 @@ def silver_mobility_dag():
     task_dim = master_zones()
 
     task_create_trips = create_silver_trips()
-    task_load_trips =  load_silver_trips.expand(year=[2023], month=[6], zone_type=["Distritos","Municipios", "GAU"])
+    task_load_trips =  load_silver_trips.expand(zone_type = ["Distritos","Municipios", "GAU"],year=[2023], month=[10], day=list(range(1,32,1)))
     
     task_load_zones = load_silver_zone()
     task_load_zones_relations = load_silver_ine_mitma_zones()
