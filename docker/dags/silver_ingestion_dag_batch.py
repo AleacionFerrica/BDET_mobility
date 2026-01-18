@@ -1117,7 +1117,7 @@ def silver_mobility_dag():
     task_create_trips = create_silver_trips()
     #task_load_trips =  load_silver_trips.expand(zone_type = ["Distritos","Municipios", "GAU"],year=[2023], month=[10], day=list(range(1,32,1)))
     #batch_overrides_list = sql_batch(zones = ["Distritos","Municipios", "GAU"],years=[2023], months=[3,4,5,6,7,8,9,11,12], days=list(range(1,32,1)))
-    batch_overrides_list = sql_batch(zones = ["Distritos","Municipios","GAU"],years=[2023], months=[1,2], days=list(range(1,32,1)))
+    batch_overrides_list = sql_batch(zones = ["Distritos","Municipios"],years=[2023], months=[10], days=list(range(1,32,1)))
     # 3. Lanzar a Batch en paralelo
     process_silver_batch = BatchOperator.partial(
         task_id='silver_trips_batch',

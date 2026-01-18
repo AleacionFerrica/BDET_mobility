@@ -11,10 +11,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# --- CONFIGURACIÓN ---
-# En Astro/Docker, 'include' suele usarse para archivos persistentes o datos locales
-AIRFLOW_HOME = os.getenv("AIRFLOW_HOME", "/usr/local/airflow")
-DB_PATH = "include/mobility.ducklake"
+# --- CONFIGURACIÓN Conexiones ---
+
 pg = BaseHook.get_connection("neon_postgres")
 aws = BaseHook.get_connection("aws_default")
 # Función auxiliar para conectar a DuckDB con las extensiones necesarias
@@ -67,7 +65,7 @@ def get_db_connection():
     #start_date=days_ago(1),
     default_args={'owner': 'airflow','retries': 3,'retry_delay': timedelta(minutes=1)},
     catchup=False,
-    max_active_tasks=28,
+    max_active_tasks=28, # neon pooling permite varias tareas a la vez
     tags=['master', 'duckdb', 'mitma', 'bronze']
 )
 def mobility_dag():
@@ -84,14 +82,14 @@ def mobility_dag():
     @task()
     def ingest_catalog():
         """Descarga y actualiza el catálogo de MITMA"""
-        catalog_URL = "https://movilidad-opendata.mitma.es/RSS.xml"
-        response = requests.get(catalog_URL)
+        catalog_URL = "https://movilidad-opendata.mitma.es/RSS.xml" # URL del catalo de MITMA
+        response = requests.get(catalog_URL) 
         response.raise_for_status()
 
-        root = ET.fromstring(response.content)
+        root = ET.fromstring(response.content) #cargar el archivo XML
         items = []
         
-        # ... (Tu lógica de parsing original) ...
+        # Loop para parsear la informacion del RSS
         for item in root.findall('./channel/item'):
             title = item.find('title').text.strip() if item.find('title') is not None else ""
             link = item.find('link').text.strip() if item.find('link') is not None else ""
@@ -180,7 +178,7 @@ def mobility_dag():
                 "source_url": link
             })
             
-        df_catalog = pd.DataFrame(items)
+        df_catalog = pd.DataFrame(items) # guardamos en un dataframe para conservar la estrucutra de la tabla
         #print(df_catalog)
         try:
             
@@ -210,6 +208,7 @@ def mobility_dag():
             
     @task()
     def get_trips_urls(year: int, zones: list, month=None):
+        # Hace una query al catalogo para sacar las URLS de archivos de una zona año y mes
         con= get_db_connection()
         print(f"Procesando Viajes: Año {year}, Mes {month}, Zona {zones}")
         urls_to_process = []
@@ -253,12 +252,14 @@ def mobility_dag():
     
     @task()
     def job_batch_params(file_info: list):
+        # recibe la lista de urls para preparar la query y configuracion de job para AWS batch
         batch_configs = []
 
         for file in file_info:
             url = file['url']
             zone = file['zone']
-
+             #try strip time saca la fecha conjunta esto es necesario para la carga a silver ya que particionamos por zona y fecha 
+             #try_strptime(fecha::VARCHAR || LPAD(periodo::VARCHAR, 2, '0'), '%Y%m%d%H') as date 
             sql_logic = f"""
                 INSTALL httpfs; LOAD httpfs;
                 BEGIN TRANSACTION;
@@ -266,9 +267,10 @@ def mobility_dag():
                 
                 CREATE TABLE IF NOT EXISTS bronze.trips AS 
                 SELECT *, '{zone}' as zone_type, current_timestamp as ingestion_date, 
-                       try_strptime(fecha::VARCHAR || LPAD(periodo::VARCHAR, 2, '0'), '%Y%m%d%H') as date
+                       try_strptime(fecha::VARCHAR || LPAD(periodo::VARCHAR, 2, '0'), '%Y%m%d%H') as date 
                 FROM read_csv('{url}', header=True, filename=True, union_by_name=True, ignore_errors=True, all_varchar=True) 
                 LIMIT 0;
+                ALTER TABLE bronze.trips SET PARTITIONED BY (zone_type, YEAR(date), MONTH(date) );
 
                 
                 DELETE FROM bronze.trips WHERE filename = '{url}';
@@ -299,7 +301,8 @@ def mobility_dag():
 
     @task()
     def ingest_trips(file_info: dict):
-        """Ingesta de viajes basada en lo que hay en el catálogo"""
+        # FUNCION NO USADA 
+        # es la antigua logica de cargar datos sin batchoperator 
         url = file_info['url']
         zone = file_info['zone']
 
@@ -343,7 +346,7 @@ def mobility_dag():
         
         for zone in zone_list:
             print(f"Procesando geometría para: {zone}")
-
+            # QUERY para sacar los datos de zonificacion del catalogo 
             file_info = con.sql(f"""
                 SELECT source_url, filename, publication_date
                 FROM bronze.catalog 
@@ -352,6 +355,7 @@ def mobility_dag():
                 AND (filename ILIKE '%.shp' OR filename ILIKE '%.shx' OR filename ILIKE '%.dbf' OR filename ILIKE '%.prj' OR filename ILIKE '%.csv')
             """).df()
             
+
             if file_info.empty:
                 continue
 
@@ -735,8 +739,8 @@ def mobility_dag():
     task_catalog = ingest_catalog()
 
     # Viajes (Trips)
-    #task_urls = get_trips_urls(year=2023, month=[3,4,5,6,7,8,9,10,11,12], zones=["Distritos","Municipios", "GAU"])
-    task_urls = get_trips_urls(year=2023, month=[1,2], zones=["Distritos","Municipios", "GAU"])
+    task_urls = get_trips_urls(year=2023, month=[1,2,3,4,5,6,7,8,9,10,11,12], zones=["Distritos","Municipios", "GAU"])
+
     #task_trips = ingest_trips.expand(file_info=task_urls)
     batch_overrides = job_batch_params(task_urls)
 
@@ -746,7 +750,6 @@ def mobility_dag():
         job_queue='duck_jobque',
         job_definition='duck_jobdef',
         region_name='eu-central-1',
-        # Opcional: Aumentar timeout porque son cargas pesadas
         
     ).expand(container_overrides=batch_overrides)
     
