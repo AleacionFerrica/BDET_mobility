@@ -86,7 +86,7 @@ def get_db_connection():
 
     
     catchup=False,
-    max_active_tasks=32,
+    max_active_tasks=64,
     tags=['master', 'duckdb', 'mitma', 'silver'] )
 
 def silver_mobility_dag():
@@ -111,11 +111,6 @@ def silver_mobility_dag():
                 ingestion_date TIMESTAMP
             );
         """)
-        
-        try:
-            con.sql("CREATE UNIQUE INDEX IF NOT EXISTS idx_original_id ON silver.dim_zones (original_id);")
-        except:
-            pass # Si falla por limitaciones del Lake, seguimos igual
             
         print("Master Table 'silver.dim_zones' .")
 
@@ -123,15 +118,41 @@ def silver_mobility_dag():
         query_candidatos = """--sql
             WITH gaus_info AS (SELECT * FROM bronze.gaus_info 
                         WHERE id_gaus != 'NA'
-                        AND id_gaus IS NOT NULL),
+                        AND id_gaus IS NOT NULL
+                                AND id_gaus NOT LIKE 'FR%' 
+                                AND id_gaus NOT LIKE 'PT%' 
+                                AND id_gaus NOT LIKE 'IT%' 
+                                AND id_gaus NOT LIKE 'DE%' 
+                                AND id_gaus NOT LIKE 'UK%' 
+                                AND id_gaus NOT LIKE 'US%'
+                                AND id_gaus NOT LIKE 'EXT%'
+                        
+                        ),
 
                 districts_info AS (SELECT * FROM bronze.districts_info  
                         WHERE id_districts != 'NA' 
-                        AND id_districts IS NOT NULL),
+                        AND id_districts IS NOT NULL
+                            AND id_districts NOT LIKE 'FR%' 
+                            AND id_districts NOT LIKE 'PT%' 
+                            AND id_districts NOT LIKE 'IT%' 
+                            AND id_districts NOT LIKE 'DE%' 
+                            AND id_districts NOT LIKE 'UK%' 
+                            AND id_districts NOT LIKE 'US%'
+                            AND id_districts NOT LIKE 'EXT%'
+                        ),
 
                 municipless_info AS (SELECT * FROM bronze.municiples_info 
                         WHERE id_municiples != 'NA' 
-                        AND id_municiples IS NOT NULL),
+                        AND id_municiples IS NOT NULL
+                            AND id_municiples NOT LIKE 'FR%' 
+                            AND id_municiples NOT LIKE 'PT%' 
+                            AND id_municiples NOT LIKE 'IT%' 
+                            AND id_municiples NOT LIKE 'DE%' 
+                            AND id_municiples NOT LIKE 'UK%' 
+                            AND id_municiples NOT LIKE 'US%'
+                            AND id_municiples NOT LIKE 'EXT%'
+                        
+                        ),
 
                 ine_mitma_zones AS (SELECT * FROM bronze.ine_mitma_zones 
                         WHERE seccion_ine != 'NA' 
@@ -210,7 +231,7 @@ def silver_mobility_dag():
         #con.sql(query_new_codes)
         try : 
             con = get_db_connection()
-            con.sql(f"CREATE  TABLE IF NOT EXISTS silver.dim_zones AS {query_new_codes} LIMIT 0")
+            con.sql(f"CREATE  TABLE IF NOT EXISTS silver.dim_zones AS {query_new_codes} LIMIT 0;")
 
             con.sql(f"""--sql
                 MERGE INTO silver.dim_zones as target
@@ -221,13 +242,12 @@ def silver_mobility_dag():
                     WHEN NOT MATCHED THEN
                         INSERT BY NAME; 
 
-                
             """)
             
 
-            con.sql("SELECT count(*) inserted_rows FROM silver.dim_zones").show()
+            
             con.commit()
-
+            con.sql("SELECT count(*) inserted_rows FROM silver.dim_zones").show()
         except Exception as e:
             con.execute("ROLLBACK;")
             print(f"Error detectado: {e}. ROLLBACK")
@@ -399,6 +419,7 @@ def silver_mobility_dag():
                                 SELECT
                                     original_id,
                                     id_zone
+
                                 FROM silver.dim_zones 
                                 WHERE source = 'mitma'
                                     AND zone_type = '{target_zone}')
@@ -448,8 +469,8 @@ def silver_mobility_dag():
                                     {"name": "HOST_POSTGRES", "value": pg.host},
                                     {"name": "RUTA_S3_DUCKLAKE", "value": "s3://yena-s3-ducklake"}
                                 ]
-                            })
-                                        
+                            })             
+        print("Number of Jobs to send: ",len(batch_configs))
         return batch_configs
 
     @task()
@@ -632,70 +653,61 @@ def silver_mobility_dag():
                     d.id_zone,
                     ifnull(TRIM(br.name_gaus), 'external') AS name_zone,
                     br.zone_type,
-                    CASE  -- comprueba si el codigo viene de fuera de españa en caso lo pone como EXT
-                        WHEN br.id_gaus LIKE 'FR%' 
-                        OR br.id_gaus LIKE 'PT%' 
-                        OR br.id_gaus LIKE 'IT%' 
-                        OR br.id_gaus LIKE 'DE%' 
-                        OR br.id_gaus LIKE 'UK%' 
-                        OR br.id_gaus LIKE 'US%'
-                        OR br.id_gaus LIKE 'EXT%'
-                        THEN 'EXT'
-                        ELSE 'ESP'
-                    END AS country_zone,
                     br.geometry,
                     br.centroid,
                     ST_PointOnSurface(br.geometry) AS visual_point,
                 FROM bronze.gaus_info br
                 LEFT JOIN silver.dim_zones d
                 ON br.id_gaus = d.original_id AND br.zone_type = d.zone_type AND d.source = 'mitma'
-                WHERE id_gaus != 'NA' AND id_gaus IS NOT NULL 
+                WHERE id_gaus != 'NA' 
+                AND id_gaus IS NOT NULL
+                    AND br.id_gaus NOT LIKE 'FR%' 
+                    AND br.id_gaus NOT LIKE 'PT%' 
+                    AND br.id_gaus NOT LIKE 'IT%' 
+                    AND br.id_gaus NOT LIKE 'DE%' 
+                    AND br.id_gaus NOT LIKE 'UK%' 
+                    AND br.id_gaus NOT LIKE 'US%'
+                    AND br.id_gaus NOT LIKE 'EXT%'
         ),
         municiples AS (SELECT 
                     d.id_zone,
                     ifnull(TRIM(br.name_municiples), 'external') AS name_zone,
                     br.zone_type,
-                    CASE  -- comprueba si el codigo viene de fuera de españa en caso lo pone como EXT
-                        WHEN br.id_municiples LIKE 'FR%' 
-                        OR br.id_municiples LIKE 'PT%' 
-                        OR br.id_municiples LIKE 'IT%' 
-                        OR br.id_municiples LIKE 'DE%' 
-                        OR br.id_municiples LIKE 'UK%' 
-                        OR br.id_municiples LIKE 'US%'
-                        OR br.id_municiples LIKE 'EXT%'
-                        THEN 'EXT'
-                        ELSE 'ESP'
-                    END AS country_zone,
                     br.geometry,
                     br.centroid,
                     ST_PointOnSurface(br.geometry) AS visual_point,
                 FROM bronze.municiples_info br
                 LEFT JOIN silver.dim_zones d
                 ON br.id_municiples = d.original_id AND br.zone_type = d.zone_type AND d.source = 'mitma'
-                WHERE id_municiples != 'NA' AND id_municiples IS NOT NULL 
+                WHERE id_municiples != 'NA' 
+                AND br.id_municiples IS NOT NULL 
+                    AND br.id_municiples NOT LIKE 'FR%' 
+                    AND br.id_municiples NOT LIKE 'PT%' 
+                    AND br.id_municiples NOT LIKE 'IT%' 
+                    AND br.id_municiples NOT LIKE 'DE%' 
+                    AND br.id_municiples NOT LIKE 'UK%' 
+                    AND br.id_municiples NOT LIKE 'US%'
+                    AND br.id_municiples NOT LIKE 'EXT%'
         ),
         districts AS (SELECT 
                     d.id_zone,
                     ifnull(TRIM(br.name_districts), 'external') AS name_zone,
                     br.zone_type,
-                    CASE  -- comprueba si el codigo viene de fuera de españa en caso lo pone como EXT
-                        WHEN br.id_districts LIKE 'FR%' 
-                        OR br.id_districts LIKE 'PT%' 
-                        OR br.id_districts LIKE 'IT%' 
-                        OR br.id_districts LIKE 'DE%' 
-                        OR br.id_districts LIKE 'UK%' 
-                        OR br.id_districts LIKE 'US%'
-                        OR br.id_districts LIKE 'EXT%'
-                        THEN 'EXT'
-                        ELSE 'ESP'
-                    END AS country_zone,
                     br.geometry,
                     br.centroid,
                     ST_PointOnSurface(br.geometry) AS visual_point,
                 FROM bronze.districts_info br
                 LEFT JOIN silver.dim_zones d
                 ON br.id_districts = d.original_id AND br.zone_type = d.zone_type AND d.source = 'mitma' 
-                WHERE id_districts != 'NA' AND id_districts IS NOT NULL 
+                WHERE id_districts != 'NA' 
+                AND id_districts IS NOT NULL
+                    AND br.id_districts NOT LIKE 'FR%' 
+                    AND br.id_districts NOT LIKE 'PT%' 
+                    AND br.id_districts NOT LIKE 'IT%' 
+                    AND br.id_districts NOT LIKE 'DE%' 
+                    AND br.id_districts NOT LIKE 'UK%' 
+                    AND br.id_districts NOT LIKE 'US%'
+                    AND br.id_districts NOT LIKE 'EXT%'
         )
 
         SELECT * FROM  gaus
@@ -738,7 +750,8 @@ def silver_mobility_dag():
                                     zone_type,
                                     id_zone,
                                     centroid
-                                FROM silver.zones_info WHERE country_zone = 'ESP' AND zone_type = '{zone_type}'--solo nos interesan zonas dentro de españa 
+                                FROM silver.zones_info WHERE zone_type = '{zone_type}'
+
                                     )
                             
                             SELECT
@@ -751,7 +764,7 @@ def silver_mobility_dag():
                             CROSS JOIN base AS b -- cross join para tener los pares 
                             WHERE a.id_zone < b.id_zone -- con < nos aseguramos de no tener distancia de A-B y B-A ni A-A   
                             """
-
+        
         con = get_db_connection()
         try:
 
@@ -773,7 +786,7 @@ def silver_mobility_dag():
                     
                     """)
             con.commit()
-            con.sql(f"SELECT count(*)as inserted_rows FROM silver.zone_pairs").show()
+            con.sql(f"SELECT count(*)as inserted_rows FROM silver.zone_pairs WHERE zone_type = '{zone_type}' ").show()
         except Exception as e:
             con.execute("ROLLBACK;")
             print(f"Error detectado: {e}. ROLLBACK")
@@ -784,7 +797,7 @@ def silver_mobility_dag():
     @task()
     def population_check():
         con = get_db_connection()
-        
+        batch_configs = []
         table_name = "bronze.poblacion_total"
         target_table = "silver.spain_population"
 
@@ -805,87 +818,88 @@ def silver_mobility_dag():
                 
                 FROM bronze.poblacion_total """).show()
         # 2. Query Maestra: Unpivot + Imputación + Estadísticas + Detección de Atípicos
-        query_transformacion = f"""--sql
-        WITH raw_unpivoted AS (
-            SELECT 
-                d.id_zone as id_zone, -- Usamos Sección Censal como ID
-                name as name_zone,
-                UNNEST({sql_year_label_list})::INT as year,
-                UNNEST({sql_col_list})::DOUBLE as population_raw
-            FROM {table_name} br LEFT JOIN silver.dim_zones d ON br.ine_section = d.original_id AND d.source = 'ine' AND d.zone_type = 'sections'
-        ),
-        calc_imputation AS (
+        query_transformacion = f"""
+            WITH raw_unpivoted AS (
+                SELECT 
+                    d.id_zone as id_zone,
+                    name as name_zone,
+                    d.zone_type as zone_type,
+                    d.source as source,
+                    UNNEST({sql_year_label_list})::INT as year,
+                    UNNEST({sql_col_list})::DOUBLE as population_raw
+                FROM {table_name} br LEFT JOIN silver.dim_zones d ON br.ine_section = d.original_id AND d.source = 'ine' AND d.zone_type = 'sections'
+            ),
+            calc_imputation AS (
+                SELECT 
+                    *,
+                    COALESCE(
+                        population_raw, 
+                        
+                        LAST_VALUE(population_raw IGNORE NULLS) 
+                            OVER(PARTITION BY id_zone ORDER BY year 
+                                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
+                        
+                        FIRST_VALUE(population_raw IGNORE NULLS) 
+                            OVER(PARTITION BY id_zone ORDER BY year 
+                                ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING),
+                        0
+                    ) as population,
+                    
+                    CASE WHEN population_raw IS NULL THEN TRUE ELSE FALSE END as is_imputed
+                FROM raw_unpivoted
+            ),
+            stats_calc AS (
+                SELECT 
+                    *,
+                    (population - LAG(population) OVER(PARTITION BY id_zone ORDER BY year)) / 
+                    NULLIF(LAG(population) OVER(PARTITION BY id_zone ORDER BY year), 0) as pct_change,
+                    
+                    (population - AVG(population) OVER(PARTITION BY year)) / 
+                    NULLIF(STDDEV(population) OVER(PARTITION BY year), 0) as z_score_size
+                FROM calc_imputation
+            )
             SELECT 
                 *,
-                -- IMPUTACIÓN (Forward Fill + Backward Fill + 0)
-                COALESCE(
-                    population_raw, 
-                    
-                    -- Si falta dato, coge el del año anterior
-                    LAST_VALUE(population_raw IGNORE NULLS) 
-                        OVER(PARTITION BY id_zone ORDER BY year 
-                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
-                    
-                    --  Si es el primer año y falta, coge el del siguiente
-                    FIRST_VALUE(population_raw IGNORE NULLS) 
-                        OVER(PARTITION BY id_zone ORDER BY year 
-                            ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING),
-                    
-                    -- Si todo es nulo, asume 0 habitantes
-                    0
-                ) as population,
-                
-                CASE WHEN population_raw IS NULL THEN TRUE ELSE FALSE END as is_imputed
-            FROM raw_unpivoted
-        ),
-        stats_calc AS (
-            SELECT 
-                *,
-                -- Variación Interanual
-                (population - LAG(population) OVER(PARTITION BY id_zone ORDER BY year)) / 
-                NULLIF(LAG(population) OVER(PARTITION BY id_zone ORDER BY year), 0) as pct_change,
-                
-                -- Z-Score (Comparación con el resto de secciones ese año)
-                (population - AVG(population) OVER(PARTITION BY year)) / 
-                NULLIF(STDDEV(population) OVER(PARTITION BY year), 0) as z_score_size
-            FROM calc_imputation
-        )
-        SELECT 
-            *,
-            -- --- DETECCIÓN DE ATÍPICOS ---
-            -- Marca TRUE si es un outlier estadístico extremo Y ADEMÁS ha tenido un cambio brusco
-            CASE 
-                WHEN ABS(z_score_size) > 10 
-                    OR ABS(pct_change) > 2
-                THEN TRUE 
-                ELSE FALSE 
-            END as is_atypical
-        FROM stats_calc
+                CASE 
+                    WHEN ABS(z_score_size) > 10 
+                        OR ABS(pct_change) > 2
+                    THEN TRUE 
+                    ELSE FALSE 
+                END as is_atypical
+            FROM stats_calc
 
-        """
-        try:
-            con.begin()
-            
-            
-            con.sql(f"CREATE TABLE IF NOT EXISTS {target_table} AS {query_transformacion} LIMIT 0")
-            con.sql(f"""MERGE INTO {target_table} AS target
-                        USING ({query_transformacion}) AS source
-                        ON target.id_zone = source.id_zone 
-                        AND target.name_zone = source.name_zone
-                        AND target.year = source.year
-                        WHEN NOT MATCHED THEN
-                            INSERT BY NAME;
-                    
-                        """)
+            """
 
-            n_atipicos = con.sql(f"SELECT count(*) FROM {target_table} WHERE is_atypical = TRUE").fetchone()[0]
-            print(f"Marked {n_atipicos} observations as atypical.")
-        except Exception as e:
-            con.execute("ROLLBACK;")
-            print(f"Error detectado: {e}. ROLLBACK")
-            raise e
-        finally:
-            con.close()
+        sql_logic = f"""
+            BEGIN TRANSACTION;
+            CREATE TABLE IF NOT EXISTS {target_table} AS {query_transformacion} LIMIT 0;
+            
+            MERGE INTO {target_table} AS target
+                USING ({query_transformacion}) AS source
+                ON target.id_zone = source.id_zone 
+                AND target.name_zone = source.name_zone
+                AND target.year = source.year
+                WHEN NOT MATCHED THEN
+                    INSERT BY NAME;
+            COMMIT;
+                """.replace('\n', ' ').strip()
+        batch_configs.append({
+                        'resourceRequirements': [
+                            {'type': 'VCPU', 'value': "4", },
+                            {'type': 'MEMORY', 'value': "8110", }
+                        ],
+                        "environment": [
+                            {"name": "SQL_QUERY", "value": sql_logic},
+                            {"name": "memory", "value": "7GB"},
+                            {"name": "AWS_DEFAULT_REGION", "value": "eu-central-1"},
+                            {"name": "USUARIO_POSTGRES", "value": "neondb_owner"},
+                            {"name": "CONTR_POSTGRES", "value": pg.password},
+                            {"name": "HOST_POSTGRES", "value": pg.host},
+                            {"name": "RUTA_S3_DUCKLAKE", "value": "s3://yena-s3-ducklake"}
+                        ]
+                    })
+        return batch_configs
+        
 
     @task()
     def average_income_check():
@@ -905,11 +919,13 @@ def silver_mobility_dag():
         print(f"Detectados años: {years_labels}")
 
 
-        query_transformacion = f"""--sql
+        query_transformacion = f"""
         WITH raw_unpivoted AS (
             SELECT 
                 id_zone,
                 name as name_zone,
+                d.zone_type  as zone_type,
+                d.source as source,
                 UNNEST({sql_year_label_list})::INT as year,
                 UNNEST({sql_col_list})::DOUBLE as income_raw
             FROM {table_name} br LEFT JOIN silver.dim_zones d ON br.ine_district = d.original_id AND d.source = 'ine' AND d.zone_type = 'districts'
@@ -933,52 +949,54 @@ def silver_mobility_dag():
         stats_calc AS (
             SELECT 
                 *,
-                -- Cálculo de variación (Change)
                 (income - LAG(income) OVER(PARTITION BY id_zone ORDER BY year)) / 
                 NULLIF(LAG(income) OVER(PARTITION BY id_zone ORDER BY year), 0) as pct_change,
                 
-                -- Cálculo de Z-Score
                 (income - AVG(income) OVER(PARTITION BY year)) / 
                 NULLIF(STDDEV(income) OVER(PARTITION BY year), 0) as z_score_size
             FROM calc_imputation
         )
         SELECT 
             *,
-            -- --- LÓGICA DE DETECCIÓN DE ATÍPICOS ---
-            -- Condición: (Z-Score > 5 O < -5) Y (Cambio fuera de rango -1 a 1)
             CASE 
-                WHEN ABS(z_score_size) > 5  -- Esto cubre > 5 y < -5
-                    OR ABS(pct_change) > 1 -- Esto cubre > 1 (100%) y < -1 (-100%)
+                WHEN ABS(z_score_size) > 5  
+                    OR ABS(pct_change) > 1 
                 THEN TRUE 
                 ELSE FALSE 
             END as is_atypical
         FROM stats_calc
-        --ORDER BY ine_district, year
         """
-        try:
-            con.begin()
+        sql_logic = f"""
+            BEGIN TRANSACTION;
+            CREATE TABLE IF NOT EXISTS {target_table} AS {query_transformacion} LIMIT 0;
             
-            
-            con.sql(f"CREATE TABLE IF NOT EXISTS {target_table} AS {query_transformacion} LIMIT 0")
-            con.sql(f"""MERGE INTO {target_table} AS target
-                        USING ({query_transformacion}) AS source
-                        ON target.id_zone = source.id_zone 
-                        AND target.name_zone = source.name_zone
-                        AND target.year = source.year
-                        WHEN NOT MATCHED THEN
-                            INSERT BY NAME;
-                    
-                        """)
-
-            n_atipicos = con.sql(f"SELECT count(*) FROM {target_table} WHERE is_atypical = TRUE").fetchone()[0]
-            print(f"Marked {n_atipicos} observations as atypical.")
-            con.commit()
-        except Exception as e:
-            con.execute("ROLLBACK;")
-            print(f"Error detectado: {e}. ROLLBACK")
-            raise e
-        finally:
-            con.close()
+            MERGE INTO {target_table} AS target
+                USING ({query_transformacion}) AS source
+                ON target.id_zone = source.id_zone 
+                    AND target.name_zone = source.name_zone
+                    AND target.year = source.year
+                    WHEN NOT MATCHED THEN
+                        INSERT BY NAME;
+            COMMIT;
+                """.replace('\n', ' ').strip()
+        batch_configs = []
+        batch_configs.append({
+                        'resourceRequirements': [
+                            {'type': 'VCPU', 'value': "2", },
+                            {'type': 'MEMORY', 'value': "8192", }
+                        ],
+                        "environment": [
+                            {"name": "SQL_QUERY", "value": sql_logic},
+                            {"name": "memory", "value": "7GB"},
+                            {"name": "AWS_DEFAULT_REGION", "value": "eu-central-1"},
+                            {"name": "USUARIO_POSTGRES", "value": "neondb_owner"},
+                            {"name": "CONTR_POSTGRES", "value": pg.password},
+                            {"name": "HOST_POSTGRES", "value": pg.host},
+                            {"name": "RUTA_S3_DUCKLAKE", "value": "s3://yena-s3-ducklake"}
+                        ]
+                    })
+        
+        return batch_configs
 
 
     @task()
@@ -1004,7 +1022,7 @@ def silver_mobility_dag():
                 -- Métrica derivada clave: Kilómetros promedio por viaje unitario
                 -- Si n_trips es 0, evitamos división por cero
                 trips_total_length_km / NULLIF(n_trips, 0) as avg_km_per_trip
-            FROM {source_table} USING SAMPLE 5% -- dado el gran numero de viajes usamos un sample de los datos
+            FROM {source_table} USING SAMPLE 2% -- dado el gran numero de viajes usamos un sample de los datos
         ),
         stats_window AS (
             SELECT 
@@ -1101,8 +1119,8 @@ def silver_mobility_dag():
 
     task_create_trips = create_silver_trips()
     #task_load_trips =  load_silver_trips.expand(zone_type = ["Distritos","Municipios", "GAU"],year=[2023], month=[10], day=list(range(1,32,1)))
-    batch_overrides_list = sql_batch(zones = ["Distritos","Municipios", "GAU"],years=[2023], months=[3,4,5,6,7,8,9,11,12], days=list(range(1,32,1)))
-
+    #batch_overrides_list = sql_batch(zones = ["Distritos","Municipios", "GAU"],years=[2023], months=[3,4,5,6,7,8,9,11,12], days=list(range(1,32,1)))
+    batch_overrides_list = sql_batch(zones = ["Distritos","Municipios","GAU"],years=[2023], months=[1,2], days=list(range(1,32,1)))
     # 3. Lanzar a Batch en paralelo
     process_silver_batch = BatchOperator.partial(
         task_id='silver_trips_batch',
@@ -1119,7 +1137,24 @@ def silver_mobility_dag():
     task_load_zone_pairs = load_zone_pairs.expand(zone_type=["districts", "municiples", "gaus"])
     
     task_population = population_check()
+    population_silver_batch = BatchOperator.partial(
+        task_id='silver_population_batch',
+        job_name='silver-population-worker',
+        job_queue='duck_jobque',
+        job_definition='duck_jobdef',
+        region_name='eu-central-1',
+
+    ).expand(container_overrides=task_population)
+
     task_income = average_income_check()
+    income_silver_batch = BatchOperator.partial(
+        task_id='silver_income_batch',
+        job_name='silver-income-worker',
+        job_queue='duck_jobque',
+        job_definition='duck_jobdef',
+        region_name='eu-central-1',
+
+    ).expand(container_overrides=task_income)
     
     task_trips_check = check_trips_quality()
 

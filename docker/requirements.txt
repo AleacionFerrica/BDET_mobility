@@ -7,3 +7,5 @@ pyarrow
 apache-airflow-providers-amazon
 numpy
 scikit-learn
+matplotlib
+seaborn

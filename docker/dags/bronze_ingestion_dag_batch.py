@@ -1,4 +1,4 @@
-from airflow.sdk import Asset, dag, task
+from airflow.sdk import Asset, dag, task, Param
 from airflow.sdk.bases.hook import BaseHook
 from airflow.providers.amazon.aws.operators.batch import BatchOperator
 import duckdb
@@ -66,8 +66,6 @@ def get_db_connection():
     #schedule_interval='@weekly', # Ejecutar semanalmente o cuando quieras
     #start_date=days_ago(1),
     default_args={'owner': 'airflow','retries': 3,'retry_delay': timedelta(minutes=1)},
-
-    
     catchup=False,
     max_active_tasks=28,
     tags=['master', 'duckdb', 'mitma', 'bronze']
@@ -737,7 +735,8 @@ def mobility_dag():
     task_catalog = ingest_catalog()
 
     # Viajes (Trips)
-    task_urls = get_trips_urls(year=2023, month=[3,4,5,6,7,8,9,10,11,12], zones=["Distritos","Municipios", "GAU"])
+    #task_urls = get_trips_urls(year=2023, month=[3,4,5,6,7,8,9,10,11,12], zones=["Distritos","Municipios", "GAU"])
+    task_urls = get_trips_urls(year=2023, month=[1,2], zones=["Distritos","Municipios", "GAU"])
     #task_trips = ingest_trips.expand(file_info=task_urls)
     batch_overrides = job_batch_params(task_urls)
 
@@ -750,7 +749,7 @@ def mobility_dag():
         # Opcional: Aumentar timeout porque son cargas pesadas
         
     ).expand(container_overrides=batch_overrides)
-
+    
     # Geometrías
     task_zones = ingest_zone_geometries(zone_list=["distritos", "municipios", "gaus"])
     

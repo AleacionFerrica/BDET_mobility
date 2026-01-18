@@ -1,4 +1,4 @@
-from airflow.sdk import Asset, dag, task
+from airflow.sdk import Asset, dag, task, Param
 from airflow.sdk.bases.hook import BaseHook
 from airflow.providers.amazon.aws.operators.batch import BatchOperator
 import duckdb
@@ -90,7 +90,7 @@ def get_db_connection():
 
     
     catchup=False,
-    max_active_tasks=2,
+    max_active_tasks=10,
     tags=['master', 'duckdb', 'gold'] )
 
 def business1_dag():
@@ -139,7 +139,7 @@ def business1_dag():
     @task
     def build_day_clusters(
         year: int,
-        n_clusters: int = 2,
+        n_clusters: int = 3,
         include_volume_in_clustering: bool = True,
         random_state: int = 42) -> None:
 
@@ -246,8 +246,8 @@ def business1_dag():
             df_clusters = pd.concat(out_rows, ignore_index=True)
 
 
-    
-            con.sql("CREATE TABLE IF NOT EXISTS gold.day_clusters AS SELECT *,current_timestamp as ingestion_date FROM df_clusters LIMIT 0;")
+            #con.sql("DROP TABLE gold.day_clusters ")
+            con.sql("CREATE TABLE IF NOT EXISTS gold.day_clusters AS SELECT *,current_timestamp as ingestion_date FROM df_clusters LIMIT 0 ;")
 
             con.sql(
                 """
@@ -292,7 +292,7 @@ def business1_dag():
         days_count INTEGER DEFAULT 0
         )
         """)
-        con.sql("ALTER TABLE gold.staging_accumulated SET PARTITIONED BY (zone_type, cluster_id );")
+        con.sql("ALTER TABLE gold.staging_accumulated SET PARTITIONED BY (zone_type, cluster_id);")
         con.close()
 
     @task()
@@ -350,6 +350,7 @@ def business1_dag():
                         SELECT * FROM monthly_aggregate
                     """
                     sql_logic1 = f"""
+                    BEGIN TRANSACTION;
                     MERGE INTO gold.staging_accumulated AS target
                     USING ({source_query1}) AS source
                     ON target.zone_type = source.zone_type
@@ -364,16 +365,17 @@ def business1_dag():
                         sum_daily_length_km = target.sum_daily_length_km + source.sum_daily_length_km,
                         days_count = target.days_count + source.days_count
                     WHEN NOT MATCHED THEN INSERT BY NAME;
+                    COMMIT;
                     """.replace('\n', ' ').strip()
 
                     batch_configs.append({
-                        'resourceRequirements': [
-                            {'type': 'VCPU', 'value': "4", },
-                            {'type': 'MEMORY', 'value': "16384", }
-                        ],
-                        "environment": [
-                            {"name": "SQL_QUERY", "value": sql_logic1},
-                            {"name": "memory", "value": "15GB"},
+                    'resourceRequirements': [
+                        {'type': 'VCPU', 'value': "4", },
+                        {'type': 'MEMORY', 'value': "32768", }
+                    ],
+                    "environment": [
+                        {"name": "SQL_QUERY", "value": sql_logic1},
+                        {"name": "memory", "value": "30GB"},
                             {"name": "AWS_DEFAULT_REGION", "value": "eu-central-1"},
                             {"name": "USUARIO_POSTGRES", "value": "neondb_owner"},
                             {"name": "CONTR_POSTGRES", "value": pg.password},
@@ -423,6 +425,7 @@ def business1_dag():
                         SELECT * FROM monthly_aggregate
                     """
                     sql_logic2 = f"""
+                    BEGIN TRANSACTION;
                     MERGE INTO gold.staging_accumulated AS target
                     USING ({source_query2}) AS source
                     ON target.zone_type = source.zone_type
@@ -437,16 +440,17 @@ def business1_dag():
                         sum_daily_length_km = target.sum_daily_length_km + source.sum_daily_length_km,
                         days_count = target.days_count + source.days_count
                     WHEN NOT MATCHED THEN INSERT BY NAME;
+                    COMMIT;
                     """.replace('\n', ' ').strip()
 
                     batch_configs.append({
-                        'resourceRequirements': [
-                            {'type': 'VCPU', 'value': "4", },
-                            {'type': 'MEMORY', 'value': "16384", }
-                        ],
-                        "environment": [
-                            {"name": "SQL_QUERY", "value": sql_logic2},
-                            {"name": "memory", "value": "15GB"},
+                    'resourceRequirements': [
+                        {'type': 'VCPU', 'value': "4", },
+                        {'type': 'MEMORY', 'value': "32768", }
+                    ],
+                    "environment": [
+                        {"name": "SQL_QUERY", "value": sql_logic2},
+                        {"name": "memory", "value": "30GB"},
                             {"name": "AWS_DEFAULT_REGION", "value": "eu-central-1"},
                             {"name": "USUARIO_POSTGRES", "value": "neondb_owner"},
                             {"name": "CONTR_POSTGRES", "value": pg.password},
@@ -532,11 +536,11 @@ def business1_dag():
                 batch_configs.append({
                     'resourceRequirements': [
                         {'type': 'VCPU', 'value': "4", },
-                        {'type': 'MEMORY', 'value': "16384", }
+                        {'type': 'MEMORY', 'value': "32768", }
                     ],
                     "environment": [
-                        {"name": "SQL_QUERY", "value": sql_logic1},
-                        {"name": "memory", "value": "15GB"},
+                        {"name": "SQL_QUERY", "value": sql_logic2},
+                        {"name": "memory", "value": "30GB"},
                         {"name": "AWS_DEFAULT_REGION", "value": "eu-central-1"},
                         {"name": "USUARIO_POSTGRES", "value": "neondb_owner"},
                         {"name": "CONTR_POSTGRES", "value": pg.password},
@@ -605,11 +609,11 @@ def business1_dag():
                 batch_configs.append({
                     'resourceRequirements': [
                         {'type': 'VCPU', 'value': "4", },
-                        {'type': 'MEMORY', 'value': "16384", }
+                        {'type': 'MEMORY', 'value': "32768", }
                     ],
                     "environment": [
                         {"name": "SQL_QUERY", "value": sql_logic2},
-                        {"name": "memory", "value": "15GB"},
+                        {"name": "memory", "value": "30GB"},
                         {"name": "AWS_DEFAULT_REGION", "value": "eu-central-1"},
                         {"name": "USUARIO_POSTGRES", "value": "neondb_owner"},
                         {"name": "CONTR_POSTGRES", "value": pg.password},
@@ -678,11 +682,11 @@ def business1_dag():
                 batch_configs.append({
                     'resourceRequirements': [
                         {'type': 'VCPU', 'value': "4", },
-                        {'type': 'MEMORY', 'value': "16384", }
+                        {'type': 'MEMORY', 'value': "32768", }
                     ],
                     "environment": [
                         {"name": "SQL_QUERY", "value": sql_logic3},
-                        {"name": "memory", "value": "15GB"},
+                        {"name": "memory", "value": "30GB"},
                         {"name": "AWS_DEFAULT_REGION", "value": "eu-central-1"},
                         {"name": "USUARIO_POSTGRES", "value": "neondb_owner"},
                         {"name": "CONTR_POSTGRES", "value": pg.password},
@@ -733,7 +737,7 @@ def business1_dag():
                 """
                 sql_logic4 = f"""
                 MERGE INTO gold.staging_accumulated AS target
-                USING ({source_query3}) AS source
+                USING ({source_query4}) AS source
                 ON target.zone_type = source.zone_type
                 AND target.cluster_id = source.cluster_id
                 AND target.pattern_name = source.pattern_name
@@ -751,11 +755,11 @@ def business1_dag():
                 batch_configs.append({
                     'resourceRequirements': [
                         {'type': 'VCPU', 'value': "4", },
-                        {'type': 'MEMORY', 'value': "16384", }
+                        {'type': 'MEMORY', 'value': "32768", }
                     ],
                     "environment": [
                         {"name": "SQL_QUERY", "value": sql_logic4},
-                        {"name": "memory", "value": "15GB"},
+                        {"name": "memory", "value": "30GB"},
                         {"name": "AWS_DEFAULT_REGION", "value": "eu-central-1"},
                         {"name": "USUARIO_POSTGRES", "value": "neondb_owner"},
                         {"name": "CONTR_POSTGRES", "value": pg.password},
@@ -783,9 +787,10 @@ def business1_dag():
                 avg_trips_per_day DOUBLE,
                 total_trips_in_cluster_sample DOUBLE,
                 n_days_in_cluster INTEGER,
-                ingestion_date TIMESTAMP)
+                ingestion_date TIMESTAMP);
     
      """)
+        con.sql("ALTER TABLE gold.typical_day_patterns SET PARTITIONED BY (zone_type, pattern_name );")
         
     @task()
     def build_typical_day_sql(zones):
@@ -795,7 +800,7 @@ def business1_dag():
         for zone in zones:
                 # ESTO GUARDA SACA de staging y agrupa zona cluster hora origen, destino y grupo de distancia 
                 source_query = f"""
-                            SELECT count(*) FROM (
+                             
                                 WITH zone_clusters_days AS(
                                 SELECT zone_type, cluster_id, COUNT(*) AS n_days
                                     FROM gold.day_clusters
@@ -808,10 +813,10 @@ def business1_dag():
                                 g.cluster_id,
                                 g.pattern_name,
                                 g.hour_of_day,
-                                TRY_CAST(g.id_origin AS INTEGER) AS id_origen,
+                                TRY_CAST(g.id_origin AS INTEGER) AS id_origin,
                                 TRY_CAST(g.id_destination AS INTEGER) AS id_destination ,
                                 g.distance_group_km,
-                                ROUND(SUM(sum_daily_trips) / SUM(days_count), 2) AS avg_trips_per_day,
+                                ROUND(SUM(sum_daily_trips) / c.n_days, 2) AS avg_trips_per_day,
                                 
                                 ROUND(SUM(sum_daily_trips),1) AS total_trips_in_cluster_sample,
                                 c.n_days AS n_days_in_cluster,
@@ -823,8 +828,8 @@ def business1_dag():
                             WHERE g.zone_type = '{zone}' 
                             GROUP BY 
                                 g.zone_type, g.cluster_id, g.pattern_name, 
-                                g.hour_of_day, g.id_origin, g.id_destination, g.distance_group_km, n_days_in_cluster
-                            ORDER BY avg_trips_per_day DESC)
+                                g.hour_of_day, id_origin,id_destination, g.distance_group_km, n_days_in_cluster
+                            ORDER BY avg_trips_per_day DESC
                         """
                 
                 sql_logic = f"""
@@ -855,7 +860,7 @@ def business1_dag():
                         {"name": "RUTA_S3_DUCKLAKE", "value": "s3://yena-s3-ducklake"}
                     ]
                 })
-
+        return batch_configs
 
 
 
@@ -869,7 +874,7 @@ def business1_dag():
 
     task_staging = create_staging()
 
-    batch_overrides = build_staging_accumulated_sql(zones=["gaus","municiples" ], years=[2023],months=list(range(3,13)) )
+    batch_overrides = build_staging_accumulated_sql(zones=["gaus" ], years=[2023],months=[5])#list(range(3,13)) )
     # Patrones GUARDA EN LA tabla staging por zona cluster hora origen, destino y grupo de distancia el numero de viajes para luego hacer el promedio de viajes
     day_patterns_tasks = BatchOperator.partial(
         task_id='gold-batch-patterns',
@@ -882,19 +887,18 @@ def business1_dag():
         
     ).expand(container_overrides=batch_overrides)
 
-    batch_overrides_dist = build_staging_accumulated_sql_dist(zone="districts", years=[2023],months=list(range(3,13)) )
+    # batch_overrides_dist = build_staging_accumulated_sql_dist(zone="districts", years=[2023],months=list(range(3,13)) )
 
-    #DIFERENTE PARA DISTRITOS NECESITA QUERYS MAS PEQUEÑAS separa el mes en 4 partes 
-    day_patterns_tasks_dist = BatchOperator.partial(
-        task_id='gold-batch-patterns_districts',
-        job_name='gold-day-patterns_districts',
-        job_queue='duck_jobque',
-        job_definition='duck_jobdef',
-        region_name='eu-central-1',
-        submit_job_timeout= 1200,
-        # Opcional: Aumentar timeout porque son cargas pesadas
-        
-    ).expand(container_overrides=batch_overrides_dist)
+    # #DIFERENTE PARA DISTRITOS NECESITA QUERYS MAS PEQUEÑAS separa el mes en 4 partes 
+    # day_patterns_tasks_dist = BatchOperator.partial(
+    #     task_id='gold-batch-patterns_districts',
+    #     job_name='gold-day-patterns_districts',
+    #     job_queue='duck_jobque',
+    #     job_definition='duck_jobdef',
+    #     region_name='eu-central-1',
+    #     submit_job_timeout= 1200,
+    #     # Opcional: Aumentar timeout porque son cargas pesadas 
+    #).expand(container_overrides=batch_overrides_dist)
     
     typical_day_table = build_typical_day_table()
     typical_day_overrides = build_typical_day_sql(zones=["gaus","municiples","districts"])
@@ -912,12 +916,12 @@ def business1_dag():
 
 
     gold_init >> day_clusters
-    gold_init >> task_staging # CAMBIAR FINAL day_clusters >> task_staging
+    #gold_init >> task_staging # CAMBIAR FINAL day_clusters >> task_staging
 
-    task_staging >> batch_overrides
-    task_staging >> batch_overrides_dist
+    #task_staging >> batch_overrides
+    #day_patterns_tasks >> batch_overrides_dist
 
-    task_staging >> typical_day_table
+    #day_patterns_tasks >> typical_day_table
     typical_day_table >> typical_day_overrides
 
 
