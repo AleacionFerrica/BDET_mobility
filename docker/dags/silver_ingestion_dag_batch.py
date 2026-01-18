@@ -372,9 +372,6 @@ def silver_mobility_dag():
                     n_trips DOUBLE,
                     trips_total_length_km DOUBLE,
 
-                    origin_activity_std boolean,
-                    destination_activity_std boolean,
-
                     ingestion_date TIMESTAMP
                 );
             """)
