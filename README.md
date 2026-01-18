@@ -12,17 +12,17 @@ The project adopts a Lakehouse paradigm that organizes data flow into three stag
 ### Bronze Layer (Raw)
 The Bronze layer ingests and stores mobility and demographic data in its original format to maintain an immutable history. It handles the ingestion of MITMA mobility matrices and INE socio-economic indicators using a catalog-based approach.
 
-![Bronze Layer Schema](Lakehouse diagrams/esq_bronze.jpg)
+![Bronze Layer Schema](diagrams/esq_bronze.jpg)
 
 ### Silver Layer (Trusted)
 In the Silver layer, data is cleaned, validated, and enriched to impose a consistent structure. A critical component of this layer is the creation of a master `dim_zones` table, which maps and unifies disparate zone codes from MITMA and INE into a consistent internal ID, enabling seamless integration between sources .
 
-![Silver Layer Schema](Lakehouse diagrams/esq_silver.png)
+![Silver Layer Schema](diagrams/esq_silver.png)
 
 ### Gold Layer (Curated)
 The Gold layer contains aggregated, business-ready data products designed to answer specific business questions. It utilizes complex transformations and aggregations to produce analytical insights.
 
-![Gold Layer Schema - Typical Day](Lakehouse diagrams/esq_gold_bq1.jpg)
+![Gold Layer Schema - Typical Day](diagrams/esq_gold_bq1.jpg)
 
 ## Business Questions
 The analytics layer addresses two primary use cases:
@@ -30,7 +30,7 @@ The analytics layer addresses two primary use cases:
 **1. Typical Day Analysis**
 * **Objective:** To characterize daily mobility patterns across different zones.
 **Approach:** Aggregation of trips by day and hour, followed by K-Means clustering to classify days into distinct patterns: "Weekday," "Weekend," or "Holiday".
-![Gold Layer Schema - Typical Day](Lakehouse diagrams/esq_gold_bq2.jpg)
+![Gold Layer Schema - Typical Day](diagrams/esq_gold_bq2.jpg)
 
 **2. Infrastructure Gaps Analysis**
 * **Objective:** To identify areas where transport infrastructure fails to meet potential demand.
