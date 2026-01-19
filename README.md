@@ -11,17 +11,17 @@ The project adopts a Lakehouse paradigm that organizes data flow into three stag
 
 ### Bronze Layer (Raw)
 The Bronze layer ingests and stores mobility and demographic data in its original format to maintain an immutable history. It handles the ingestion of MITMA mobility matrices and INE socio-economic indicators using a catalog-based approach.
-
+[BRONZE LAYER TABLES explanation](https://docs.google.com/spreadsheets/d/1IofDZCRZd2iM9vWZC1L09jQ0MyJGtVuZbBY8hz97JfA/edit?usp=sharing)
 ![Bronze Layer Schema](diagrams/esq_bronze.png)
 
 ### Silver Layer (Trusted)
 In the Silver layer, data is cleaned, validated, and enriched to impose a consistent structure. A critical component of this layer is the creation of a master `dim_zones` table, which maps and unifies disparate zone codes from MITMA and INE into a consistent internal ID, enabling seamless integration between sources .
-
+[SILVER LAYER TABLES explanation](https://docs.google.com/spreadsheets/d/1xalLR4d_V1W84ckuJ5qp6meivXvYounSUDa4d2MU3EE/edit?usp=sharing)
 ![Silver Layer Schema](diagrams/esq_silver.png)
 
 ### Gold Layer (Curated)
 The Gold layer contains aggregated, business-ready data products designed to answer specific business questions. It utilizes complex transformations and aggregations to produce analytical insights.
-
+[GOLD LAYER TABLES explanation](https://docs.google.com/spreadsheets/d/1G7k2TClHrykRETNbv-n5EVhnyGX6qtBh9jBRE4nNa3k/edit?usp=sharing)
 ![Gold Layer Schema - Typical Day](diagrams/esq_gold_bq1.png)
 
 ## Business Questions
@@ -45,4 +45,4 @@ The analytics layer addresses two primary use cases:
 * **Languages:** Python, SQL
 
 ## Conclusions
-The development of this project followed a methodology characterized by iterative trial and error, underscoring the significant challenge of designing a database architecture capable of efficiently processing and storing massive volumes of mobility data[cite: 1347]. [cite_start]Navigating the complexities of the big data framework provided a steep but invaluable learning curve, particularly in mastering industry-standard tools for orchestration, such as Apache Airflow, and implementing cloud computing strategies using AWS S3 and Batch to decouple storage from compute[cite: 1348]. [cite_start]Ultimately, despite these technical hurdles, we successfully delivered a robust 3-tier architecture, leveraging the cutting-edge capabilities of the emerging DuckLake platform to build a Data Lakehouse capable of supporting large amounts of data and use cases in transportation analysis.
+The development of this project followed a methodology characterized by iterative trial and error, underscoring the significant challenge of designing a database architecture capable of efficiently processing and storing massive volumes of mobility data. Navigating the complexities of the big data framework provided a steep but invaluable learning curve, particularly in mastering industry-standard tools for orchestration, such as Apache Airflow, and implementing cloud computing strategies using AWS S3 and Batch to decouple storage from compute. Ultimately, despite these technical hurdles, we successfully delivered a robust 3-tier architecture, leveraging the cutting-edge capabilities of the emerging DuckLake platform to build a Data Lakehouse capable of supporting large amounts of data and use cases in transportation analysis.
