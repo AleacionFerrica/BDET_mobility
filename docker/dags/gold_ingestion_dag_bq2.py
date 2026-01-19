@@ -16,18 +16,10 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 pg = BaseHook.get_connection("neon_postgres")
 aws = BaseHook.get_connection("aws_default")
-AIRFLOW_HOME = os.getenv("AIRFLOW_HOME", "/usr/local/airflow")
-DB_PATH = "include/mobility.ducklake"
+
 
 # Función auxiliar para conectar a DuckDB con las extensiones necesarias
-def get_db_connection():
-    con = duckdb.connect( )
-    con.sql("INSTALL ducklake; LOAD ducklake;")
-    con.sql("INSTALL spatial; LOAD spatial;")
-    con.sql(f"ATTACH '{DB_PATH}' AS my_ducklake;")
-    con.sql("USE my_ducklake;")
-    
-    return con
+
 
 def get_db_connection():
 
@@ -129,6 +121,7 @@ def business2_dag():
         for zt in zones:
             query = f"""
                 WITH
+                
                 od AS (SELECT 
                         TRY_CAST(id_origin AS INTEGER) AS id_origin,
                         TRY_CAST(id_destination AS INTEGER) AS id_destination,
@@ -182,15 +175,7 @@ def business2_dag():
                     AND id_{zt}_mitma NOT NULL
                     GROUP BY 1
                     ),
-                pop_district_level AS (
-                    SELECT 
-                        m.id_districts_ine,
-                        SUM(p.population) as pop_dist
-                    FROM silver.spain_population p
-                    JOIN silver.ine_mitma_zones m ON p.id_zone = m.id_sections_ine
-                    WHERE p.year = {year}
-                    GROUP BY 1
-                ),
+                
             joined AS(
                 SELECT
                         '{zt}' AS zone_type,

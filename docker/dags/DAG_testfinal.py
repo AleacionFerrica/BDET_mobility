@@ -8,6 +8,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import seaborn as sns 
 from shapely import wkt, wkb
+from shapely.geometry import LineString
 import geopandas as gpd
 import matplotlib.colors as mcolors
 import requests
@@ -281,12 +282,12 @@ def bq1_dag():
 
 
             #con.sql("DROP TABLE test.day_clusters ")
-            con.sql(f"CREATE TABLE IF NOT EXISTS test.day_clusters AS SELECT *,current_timestamp as ingestion_date FROM df_clusters LIMIT 0 ;")
+            con.sql(f"CREATE TABLE IF NOT EXISTS test.day_clusters{table_sufix} AS SELECT *,current_timestamp as ingestion_date FROM df_clusters LIMIT 0 ;")
 
             con.sql(
-                """
+                f"""
                 BEGIN TRANSACTION;
-                MERGE INTO  test.day_clusters as target
+                MERGE INTO  test.day_clusters{table_sufix} as target
                 USING (SELECT *, current_timestamp as ingestion_date
 
                         FROM df_clusters) AS sc
@@ -301,7 +302,7 @@ def bq1_dag():
         con.sql(
             f"""
             SELECT zone_type, cluster_id, pattern_name, COUNT(*) AS n_days
-            FROM test.day_clusters
+            FROM test.day_clusters{table_sufix}
             WHERE trip_date >= '{start_date} 00:00:00' 
             AND trip_date < '{end_date} 23:59:59.999'
             GROUP BY 1,2,3
@@ -309,28 +310,7 @@ def bq1_dag():
             """
         ).show()
         #return df_clusters
-    @task()
-    def create_staging():
-        con = get_db_connection()
-        # CREATE OR REPLACE PARA CADA VEZ QUE SE EJECUTE BORRAR la TABLA, si la dejamos entera cada vez aumentara infinitamente los valores acumulados 
-        con.sql("""
-        CREATE TABLE IF NOT EXISTS test.staging_accumulated (
-        zone_type VARCHAR,
-        cluster_id INTEGER,
-        pattern_name VARCHAR,
-        hour_of_day INTEGER,
-        id_origin INTEGER,
-        id_destination INTEGER,
-        distance_group_km VARCHAR,
-        
-        -- Acumuladores
-        sum_daily_trips DOUBLE DEFAULT 0,
-        sum_daily_length_km DOUBLE DEFAULT 0,
-        days_count INTEGER DEFAULT 0
-        )
-        """)
-        con.sql("ALTER TABLE test.staging_accumulated SET PARTITIONED BY (zone_type, cluster_id);")
-        con.close()
+   
 
     @task()
     def build_typical_pattern_sql():
@@ -360,7 +340,7 @@ def bq1_dag():
                 cluster_id, 
                 pattern_name, 
                 COUNT(*) AS n_days
-            FROM test.day_clusters
+            FROM test.day_clusters{table_sufix}
             WHERE trip_date >= '{start_date} 00:00:00' 
             AND trip_date < '{end_date} 23:59:59.999'
             GROUP BY 1, 2, 3
@@ -372,7 +352,11 @@ def bq1_dag():
             FROM silver.zones_info
             WHERE CASE
                 WHEN unhex('{geometry}') IS NOT NULL AND '{geometry}' != '' THEN
-                    ST_Intersects(ST_GeomFromWKB(unhex('{geometry}')), geometry)
+                    ST_Intersects(
+                    
+                    ST_Transform(ST_GeomFromWKB(unhex('{geometry}')), 'EPSG:4326', 'EPSG:25830'), 
+                    
+                    geometry)
                 ELSE TRUE
             END
         ),
@@ -393,7 +377,7 @@ def bq1_dag():
                         
                     FROM silver.od_trips t
 
-                    INNER JOIN test.day_clusters dc 
+                    INNER JOIN test.day_clusters{table_sufix} dc 
                         ON CAST(t.date AS DATE) = dc.trip_date 
                         AND t.zone_type = dc.zone_type
 
@@ -518,16 +502,16 @@ def bq1_dag():
                 linewidth=2
             )
 
-            plt.title(f'Average Hourly Trips - {zt} ({start_date}-{end_date})', fontsize=16)
+            plt.title(f'Average Hourly Trips - {zt} ({start_date} / {end_date})', fontsize=16)
             plt.xlabel('Hour of Day (0-23)', fontsize=12)
             plt.ylabel('Average Daily Trips', fontsize=12)
             plt.xticks(range(0, 24))
             plt.grid(True, which='both', linestyle='--', alpha=0.7)
 
-            output_dir = os.getcwd() + "/dags/output_plots"
+            output_dir = os.getcwd() + "/dags/output_plots/hourly"
             
             # Nombre del archivo
-            filename = f"{output_dir}/{zt}_{start_date}-{end_date}.png"
+            filename = f"{output_dir}/{zt}_{start_short}-{end_short}.png"
             
             # Guardar
             print(f"Guardando gráfico en: {filename}")
@@ -574,7 +558,7 @@ def bq1_dag():
                         FROM silver.zones_info
                         WHERE CASE
                             WHEN unhex('{geometry}') IS NOT NULL AND unhex('{geometry}') != '' THEN
-                                ST_Intersects(ST_GeomFromWKB(unhex('{geometry}')), geometry)
+                                ST_Intersects(ST_Transform(ST_GeomFromWKB(unhex('{geometry}')), 'EPSG:4326', 'EPSG:25830'), geometry)
                             ELSE TRUE
                         END
                     ),
@@ -582,7 +566,7 @@ def bq1_dag():
                     -- 2. Clústers
                     global_days AS (
                         SELECT cluster_id, pattern_name, COUNT(*) AS n_days
-                        FROM test.day_clusters
+                        FROM test.day_clusters{table_sufix}
                         WHERE zone_type = '{zt}'
                         GROUP BY 1,2
                         ORDER BY n_days DESC
@@ -662,7 +646,7 @@ def bq1_dag():
 
             gdf['total_volume_morning'] = gdf['origin_morning'] + gdf['destination_morning']
             gdf['balance_morning'] = np.where(
-            gdf['total_volume_morning'] > 0, (gdf['destination_morning'] - gdf['origin_morning'])  / gdf['total_volume_morning'],
+            gdf['total_volume_morning'] > 0,( (gdf['destination_morning'] - gdf['origin_morning'])  / gdf['total_volume_morning']),
             0 # Si no hay tráfico, asumimos equilibrio (o puedes poner np.nan)
             )
             print("min: ",min(gdf["balance_morning"]))
@@ -670,7 +654,7 @@ def bq1_dag():
 
             gdf['total_volume_afternoon'] = gdf['origin_afternoon'] + gdf['destination_afternoon']
             gdf['balance_afternoon'] = np.where(
-            gdf['total_volume_afternoon'] > 0, (gdf['destination_afternoon'] - gdf['origin_afternoon'])  / gdf['total_volume_afternoon'],
+            gdf['total_volume_afternoon'] > 0, ((gdf['destination_afternoon'] - gdf['origin_afternoon'])  / gdf['total_volume_afternoon']),
             0 # Si no hay tráfico, asumimos equilibrio (o puedes poner np.nan)
             )
             print("min: ",min(gdf["balance_afternoon"]))
@@ -731,10 +715,10 @@ def bq1_dag():
 
 
             plt.tight_layout()
-            output_dir = os.getcwd() + "/dags/output_plots"
+            output_dir = os.getcwd() + "/dags/output_plots/travel_balance"
             
             # Nombre del archivo
-            filename = f"{output_dir}/{zt}_Travel_Balance_{start_date}-{end_date}.png"
+            filename = f"{output_dir}/{zt}_Travel_Balance_{start_short}-{end_short}.png"
             
             # Guardar
             #print(f"Guardando gráfico en: {filename}")
@@ -742,13 +726,493 @@ def bq1_dag():
             plt.close() 
         
         
+    # -----------------BQ2-------------------------------------
+    @task
+    def sql_gravity_pair( zones):
+        ctx = get_current_context()
+        start_date = ctx["params"]["start_date"]
+        end_date = ctx["params"]["end_date"]
+        geometry = wkt.loads(ctx["params"]["target_geometry"]).wkb_hex
+        
+        sns.set_theme(style="whitegrid")
+        try:
+            s_date_obj = datetime.strptime(start_date, '%Y-%m-%d')
+            e_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
+            
+            # Formato deseado: "DD-MM" (Ej: 22-03)
+            start_short = s_date_obj.strftime('%d-%m')
+            end_short = e_date_obj.strftime('%d-%m')
+        except Exception as e:
+            # Por si acaso el formato no era YYYY-MM-DD, usamos el string original
+            print(f"Aviso: No se pudo formatear la fecha: {e}")
+            start_short = start_date
+            end_short = end_date
+        table_sufix = f"_{start_short}_{end_short}".replace('-', '_')
+        con = get_db_connection()
+        batch_configs = [ ]
+        for zt in zones:
+            query = f"""
+                WITH
+                target_zones AS ( 
+                    SELECT 
+                        id_zone,
+                        zone_type 
+                    FROM silver.zones_info
+                    WHERE CASE
+                        WHEN unhex('{geometry}') IS NOT NULL AND '{geometry}' != '' THEN
+                            ST_Intersects(ST_Transform(ST_GeomFromWKB(unhex('{geometry}')), 'EPSG:4326', 'EPSG:25830'),  geometry)
+                        ELSE TRUE
+                    END
+                ),
+                od AS (SELECT 
+                        TRY_CAST(id_origin AS INTEGER) AS id_origin,
+                        TRY_CAST(id_destination AS INTEGER) AS id_destination,
+                        SUM(n_trips) AS actual_trips
+                    FROM silver.od_trips t
+                    INNER JOIN target_zones zo
+                        ON t.id_origin = zo.id_zone 
+                        AND t.zone_type = zo.zone_type
+                    INNER JOIN target_zones zd
+                        ON t.id_destination = zd.id_zone 
+                        AND t.zone_type = zd.zone_type
+                    WHERE t.zone_type = '{zt}'
+                    AND t.date >= '{start_date} 00:00:00' 
+                    AND t.date < '{end_date} 23:59:59.999'
+                    AND id_origin <> id_destination
+                    GROUP BY 1,2 ),
+            
+                dist AS (
+                SELECT
+                        zone_type,
+                        id_origin AS a,
+                        id_destination AS b,
+                        distance_km
+                    FROM silver.zone_pairs
+                    WHERE zone_type = '{zt}'),
+
+                aux_inc AS(
+                SELECT DISTINCT id_districts_ine,
+                        id_{zt}_mitma
+                FROM silver.ine_mitma_zones
+                ),
+                inc AS (
+                    SELECT 
+                        a.id_{zt}_mitma as id_zone,
+                        AVG(income) AS inc
+                    FROM silver.average_income i
+                    LEFT JOIN aux_inc a 
+                    ON i.id_zone = a.id_districts_ine 
+                    WHERE i.year = 2023
+                    AND id_{zt}_mitma NOT NULL
+                    GROUP BY 1
+                ),
+
+                aux_pop AS(
+                SELECT DISTINCT id_sections_ine,
+                        id_{zt}_mitma
+                FROM silver.ine_mitma_zones
+                ),
+
+                pop AS (
+                    SELECT 
+                        id_{zt}_mitma as id_zone, 
+                        SUM(population) as population
+                    FROM silver.spain_population p 
+                    LEFT JOIN aux_pop a 
+                    ON p.id_zone = a.id_sections_ine 
+                    WHERE year = 2023
+                    AND id_{zt}_mitma NOT NULL
+                    GROUP BY 1
+                    ),
+                
+            joined AS(
+                SELECT
+                        '{zt}' AS zone_type,
+                        o.id_origin,
+                        o.id_destination,
+                        d.distance_km,
+                        o.actual_trips,
+                        po.population AS pop_origin,
+                        rd.inc AS inc_destination
+                    FROM od o
+                    LEFT JOIN dist d
+                        ON LEAST(o.id_origin, o.id_destination) = d.a
+                        AND GREATEST(o.id_origin, o.id_destination) = d.b
+                    LEFT JOIN pop po ON o.id_origin = po.id_zone
+                    LEFT JOIN inc rd ON o.id_destination = rd.id_zone)
+            SELECT
+                    zone_type,
+                    id_origin,
+                    id_destination,
+                    distance_km,
+                    actual_trips,
+                    pop_origin,
+                    inc_destination,
+                    ROUND((pop_origin * inc_destination)/ NULLIF(POWER(GREATEST(distance_km, 0.1), {2}), 0),4) AS x_ij,
+                    CURRENT_TIMESTAMP AS ingestion_date
+                FROM joined
+                WHERE pop_origin IS NOT NULL 
+                AND inc_destination IS NOT NULL
+                    """
+            sql_logic= f"""
+                        CREATE TABLE IF NOT EXISTS test.gravity_pair_features{table_sufix} AS ({query}) LIMIT 0;
+                           
+                            """.replace('\n', ' ').strip()
+
+            con.sql(sql_logic)
+            sql_logic1 = f"""
+                       
+                            MERGE INTO test.gravity_pair_features{table_sufix} as target
+                            USING ({query} )AS source
+                                ON target.zone_type = source.zone_type 
+                                AND target.id_origin = source.id_origin
+                                AND target.id_destination = source.id_destination
+                                AND target.distance_km = source.distance_km
+                                WHEN NOT MATCHED THEN
+                                    INSERT BY NAME;
+                            """.replace('\n', ' ').strip()
+
+            batch_configs.append({
+                'resourceRequirements': [
+                    {'type': 'VCPU', 'value': "2", },
+                    {'type': 'MEMORY', 'value': "16384", }
+                ],
+                "environment": [
+                    {"name": "SQL_QUERY", "value": sql_logic1},
+                    {"name": "memory", "value": "15GB"},
+                    {"name": "AWS_DEFAULT_REGION", "value": "eu-central-1"},
+                    {"name": "USUARIO_POSTGRES", "value": "neondb_owner"},
+                    {"name": "CONTR_POSTGRES", "value": pg.password},
+                    {"name": "HOST_POSTGRES", "value": pg.host},
+                    {"name": "RUTA_S3_DUCKLAKE", "value": "s3://yena-s3-ducklake"}
+                ]
+            })
+        return batch_configs
+
+    @task
+    def fit_gravity_k():
+        ctx = get_current_context()
+        start_date = ctx["params"]["start_date"]
+        end_date = ctx["params"]["end_date"]
+        geometry = wkt.loads(ctx["params"]["target_geometry"]).wkb_hex
+        
+        sns.set_theme(style="whitegrid")
+        try:
+            s_date_obj = datetime.strptime(start_date, '%Y-%m-%d')
+            e_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
+            
+            # Formato deseado: "DD-MM" (Ej: 22-03)
+            start_short = s_date_obj.strftime('%d-%m')
+            end_short = e_date_obj.strftime('%d-%m')
+        except Exception as e:
+            # Por si acaso el formato no era YYYY-MM-DD, usamos el string original
+            print(f"Aviso: No se pudo formatear la fecha: {e}")
+            start_short = start_date
+            end_short = end_date
+        table_sufix = f"_{start_short}_{end_short}".replace('-', '_')
+        con = get_db_connection()
+        #con.sql("DROP TABLE test.gravity_params")
+        con.sql("""
+            CREATE TABLE IF NOT EXISTS test.gravity_params (
+                time_range VARCHAR,
+                zone_type VARCHAR,
+                k DOUBLE,
+                n_pairs_used BIGINT,
+                fitted_at TIMESTAMP
+            );
+        """)
+        #con.sql(f"DELETE FROM gold.gravity_params WHERE zone_type='{zt}' AND year={year};")
+        
+        query= f"""
+        WITH bounds AS (
+            SELECT 
+                zone_type,
+                quantile_cont(x_ij, 0.25) as lower_limit,
+                quantile_cont(x_ij, 0.75) as upper_limit  
+            FROM test.gravity_pair_features{table_sufix} 
+            WHERE x_ij IS NOT NULL AND x_ij > 0
+            AND actual_trips IS NOT NULL
+            GROUP BY 1,
+        )
+
+        SELECT
+            '{table_sufix}' as time_range,
+            t.zone_type AS zone_type,
+
+            SUM(t.x_ij * t.actual_trips) / NULLIF(SUM(t.x_ij * t.x_ij), 0) AS k,
+            COUNT(*) AS n_pairs_used,
+            CURRENT_TIMESTAMP AS fitted_at
+        FROM test.gravity_pair_features{table_sufix}  t, bounds b
+        WHERE t.zone_type=b.zone_type
+            AND t.x_ij IS NOT NULL 
+            AND t.actual_trips IS NOT NULL
+
+            AND t.x_ij >= b.lower_limit 
+            AND t.x_ij <= b.upper_limit
+        GROUP BY t.zone_type
+            """
+        
+        sql_logic2= f"""
+                        MERGE INTO test.gravity_params as target
+                        USING ({query} )AS source
+                            ON target.time_range = source.time_range 
+                            AND target.zone_type = source.zone_type 
+                            AND target.n_pairs_used = source.n_pairs_used
+                            WHEN NOT MATCHED THEN
+                                INSERT BY NAME;
+                        """
+        con.sql(sql_logic2)
+
+    @task
+    def infrastructure_gap_sql():
+        ctx = get_current_context()
+        start_date = ctx["params"]["start_date"]
+        end_date = ctx["params"]["end_date"]
+        geometry = wkt.loads(ctx["params"]["target_geometry"]).wkb_hex
+        
+        sns.set_theme(style="whitegrid")
+        try:
+            s_date_obj = datetime.strptime(start_date, '%Y-%m-%d')
+            e_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
+            
+            # Formato deseado: "DD-MM" (Ej: 22-03)
+            start_short = s_date_obj.strftime('%d-%m')
+            end_short = e_date_obj.strftime('%d-%m')
+        except Exception as e:
+            # Por si acaso el formato no era YYYY-MM-DD, usamos el string original
+            print(f"Aviso: No se pudo formatear la fecha: {e}")
+            start_short = start_date
+            end_short = end_date
+        table_sufix = f"_{start_short}_{end_short}".replace('-', '_')
+        batch_configs = []
+        con = get_db_connection()
+        
+        query = f"""WITH kpar AS (
+            SELECT zone_type, k
+            FROM test.gravity_params
+            WHERE time_range='{table_sufix}'
+        )
+        SELECT
+            f.zone_type,
+            f.id_origin,
+            f.id_destination,
+            f.distance_km,
+            f.actual_trips,
+            (k.k * f.x_ij) AS theoretical_trips,
+            f.actual_trips / NULLIF((k.k * f.x_ij), 0) AS mismatch_ratio,
+            GREATEST((k.k * f.x_ij) - f.actual_trips, 0) AS gap,
+            CURRENT_TIMESTAMP AS ingestion_date
+        FROM test.gravity_pair_features{table_sufix} f
+        INNER JOIN kpar k
+            ON f.zone_type = k.zone_type
+        WHERE  f.x_ij IS NOT NULL AND f.x_ij > 0"""
+        sql_logic = f"""
+        BEGIN TRANSACTION;
+        CREATE TABLE IF NOT EXISTS test.infrastructure_gaps{table_sufix} AS ({query});
+        COMMIT;
+        """
+        
+        con.sql(sql_logic)
+
+    @task
+    def gap_plots(zones):
+        ctx = get_current_context()
+        start_date = ctx["params"]["start_date"]
+        end_date = ctx["params"]["end_date"]
+        geometry = wkt.loads(ctx["params"]["target_geometry"]).wkb_hex
+        colores = ['red', 'purple', 'blue']
+        sns.set_theme(style="whitegrid")
+        try:
+            s_date_obj = datetime.strptime(start_date, '%Y-%m-%d')
+            e_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
+            
+            # Formato deseado: "DD-MM" (Ej: 22-03)
+            start_short = s_date_obj.strftime('%d-%m')
+            end_short = e_date_obj.strftime('%d-%m')
+        except Exception as e:
+            # Por si acaso el formato no era YYYY-MM-DD, usamos el string original
+            print(f"Aviso: No se pudo formatear la fecha: {e}")
+            start_short = start_date
+            end_short = end_date
+        table_sufix = f"_{start_short}_{end_short}".replace('-', '_')
+        batch_configs = []
+        con = get_db_connection()
+        df_geo = con.sql(f""" 
+                        SELECT 
+                            id_zone,
+                            name_zone,
+                            zone_type,
+                            ST_AsWKB(geometry)as geometry,
+
+                        FROM silver.zones_info
+                        WHERE CASE
+                            WHEN unhex('{geometry}') IS NOT NULL AND unhex('{geometry}') != '' THEN
+                                ST_Intersects(ST_Transform(ST_GeomFromWKB(unhex('{geometry}')), 'EPSG:4326', 'EPSG:25830'),  geometry)
+                            ELSE TRUE
+                        END
+    
+            """ ).df()
+        
+        df = con.sql(f"""
+        WITH target_zones AS ( 
+                    SELECT 
+                        id_zone,
+                        name_zone,
+                        zone_type,
+                        visual_point,
+                    FROM silver.zones_info
+                    WHERE CASE
+                        WHEN unhex('{geometry}') IS NOT NULL AND '{geometry}' != '' THEN
+                            ST_Intersects(ST_Transform(ST_GeomFromWKB(unhex('{geometry}')), 'EPSG:4326', 'EPSG:25830'),  geometry)
+                        ELSE TRUE
+                    END
+                )
+
+        SELECT 
+            t.zone_type,
+            t.id_origin,
+            zo.name_zone as name_origin,
+            t.id_destination,
+            zd.name_zone as name_destination,
+            ROUND(actual_trips,2) as actual_trips,
+            ROUND(theoretical_trips,2) as theoretical_trips,
+            ROUND(gap,2) as gap,
+            ST_AsWKB(zo.visual_point) as point_origin,
+            ST_AsWKB(zd.visual_point) as point_destination,
+            
+
+        FROM test.infrastructure_gaps{table_sufix} t
+        LEFT JOIN target_zones zo ON zo.id_zone = t.id_origin AND zo.zone_type = t.zone_type
+        LEFT JOIN target_zones zd ON zd.id_zone = t.id_destination AND zd.zone_type = t.zone_type
+
+        ORDER BY gap DESC LIMIT 500
+            """).df()
+        
+        for i, zone in enumerate(zones):
+            df_geo_dist = df_geo[df_geo["zone_type"] == f"{zone}"]
+            df_geo_dist['geometry'] = df_geo_dist['geometry'].apply(lambda x: wkb.loads(bytes(x)))
+            gdf_dist = gpd.GeoDataFrame(df_geo_dist, geometry='geometry')
+            # ----- DISTRITOS
+            df_dist = df[df["zone_type"]==f"{zone}"]
+            df_dist['point_origin'] = df_dist['point_origin'].apply(lambda x: wkb.loads(bytes(x)))
+            df_dist['point_destination'] = df_dist['point_destination'].apply(lambda x: wkb.loads(bytes(x)))
+            df_dist
+            df_dist['line'] = df_dist.apply(
+                lambda row: LineString([row['point_origin'], row['point_destination']]), 
+                axis=1
+            )
+            df_dist['gap_abs'] = df_dist['gap'].abs()
+            df_dist['gap_abs'] = df_dist['gap_abs'].clip(upper=df_dist['gap_abs'].quantile(0.90))
+            min_width = 0.5
+            max_width = 15.0
+
+            # Normalización Min-Max matemática
+            min_gap = df_dist['gap_abs'].min()
+            max_gap = df_dist['gap_abs'].max()
+
+            # Fórmula: (Valor - Min) / (Max - Min) * (Rango_Grosor) + Grosor_Base
+            df_dist['gap_norm'] = (
+                (df_dist['gap_abs'] - min_gap) / (max_gap - min_gap)) * (max_width - min_width) + min_width
+            
+      
+            fig, axes = plt.subplots(figsize=(16, 16))
+
+            gdf_dist.plot(
+                ax=axes, 
+                color='lightblue', 
+                edgecolor='blue', 
+                alpha=0.3, 
+                linewidth=0.6,
+                aspect=None
+            )
+            gpd.GeoSeries(df_dist['line']).plot(
+                ax=axes,
+                color=colores[i % len(colores)], 
+                linewidth=df_dist['gap_norm'],
+                alpha=0.5,
+                label=f'{zone} gap'
+            )
+            axes.set_title(f"Infrastructure Gaps - {zone} ({start_short}-{end_short})")
+            axes.set_xlabel("Longitude")
+            axes.set_ylabel("Latitude")
+
+            # Ajuste final para que no se solapen
+            plt.tight_layout()
+            output_dir = os.getcwd() + "/dags/output_plots/infa_gap"
+                
+            # Nombre del archivo
+            filename = f"{output_dir}/Infraestructure_gaps_{zone}_{start_short}-{end_short}.png"
+            
+            # Guardar
+            #print(f"Guardando gráfico en: {filename}")
+            plt.savefig(filename, bbox_inches='tight')
+            plt.close()    
+
+            # GRAFICO BARRAS
+            df_top = df_dist.sort_values(by='gap', ascending=False).head(10)
+
+            # 2. Función de limpieza de nombres
+            def clean_name(name):
+                if pd.isna(name): return ""
+                # Eliminamos la coletilla que hace el nombre largo
+                return name.replace(' agregacion de municipios', '')
+
+            # Aplicar limpieza
+            df_top['origin_clean'] = df_top['name_origin'].apply(clean_name)
+            df_top['dest_clean'] = df_top['name_destination'].apply(clean_name)
+
+            # 3. Crear etiquetas formateadas (con salto de línea para ahorrar espacio horizontal)
+            # Usamos una flecha simple '->' o un salto '\n->\n'
+            df_top['route_label'] = df_top['origin_clean'] + "\n- " + df_top['dest_clean']
+
+            # 4. Configuración del Gráfico
+            labels = df_top['route_label']
+            actual = df_top['actual_trips']
+            theoretical = df_top['theoretical_trips']
+
+            x = np.arange(len(labels))
+            width = 0.35  # Ancho de barras
+
+            fig, ax = plt.subplots(figsize=(14, 8)) # Un poco más ancho para los nombres
+
+            # Barras
+            rects1 = ax.bar(x - width/2, actual, width, label='Actual Trips', color='#3498db') # Azul
+            rects2 = ax.bar(x + width/2, theoretical, width, label='Theoretical Trips', color='#e67e22') # Naranja
+
+            # --- Estilos y Escala ---
+            ax.set_yscale('log') # Escala Logarítmica
+            ax.set_ylabel('Number of Trips (Log Scale)', fontsize=12)
+            ax.set_title(f'{zone} Top Infrastructure Gaps: Actual vs Theoretical ({start_short}-{end_short})', fontsize=16, pad=20)
+
+            # Eje X
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=10)
+
+            # Leyenda y Grid
+            ax.legend(fontsize=12)
+            ax.grid(True, which="major", axis='y', linestyle='--', alpha=0.3)
+
+            plt.tight_layout()
+
+            output_dir = os.getcwd() + "/dags/output_plots/top_gap"
+                
+            # Nombre del archivo
+            filename = f"{output_dir}/top_gaps_{zone}_{start_short}-{end_short}.png"
+            
+            # Guardar
+            #print(f"Guardando gráfico en: {filename}")
+            plt.savefig(filename, bbox_inches='tight')
+            plt.close() 
 
 
 
-    gold_init = gold_schema()
 
+
+
+
+
+    test_init = gold_schema()
     day_clusters = build_day_clusters(year=2023,n_clusters=2)
-
     
     pattern = build_typical_pattern_sql()
     
@@ -762,13 +1226,35 @@ def bq1_dag():
         # Opcional: Aumentar timeout porque son cargas pesadas
         
     ).expand(container_overrides=pattern)
+    
 
     plot = hourly_plots(zone =["gaus","municiples","districts"] )
     mapa = map_plots(zone =["gaus","municiples","districts"])
 
-    gold_init >> day_clusters
+    test_init >> day_clusters
     day_clusters >> pattern
     typical_day_pattern >> plot
     typical_day_pattern >> mapa
+
+    gravity_pair = sql_gravity_pair( zones =["gaus","municiples","districts"])
+    batch_gravity_pair = BatchOperator.partial(
+        task_id='gravity_pair',
+        job_name='gravity_pair',
+        job_queue='duck_jobque',
+        job_definition='duck_jobdef',
+        region_name='eu-central-1',
+        submit_job_timeout= 1200,
+        # Opcional: Aumentar timeout porque son cargas pesadas
+        
+    ).expand(container_overrides=gravity_pair)
+
+    fit_k = fit_gravity_k()
+    infrastructure_gap = infrastructure_gap_sql()
+    mapa_gap = gap_plots(zones=["gaus","municiples","districts"])
+
+    test_init >> gravity_pair
+    batch_gravity_pair >> fit_k
+    fit_k >> infrastructure_gap
+    infrastructure_gap >> mapa_gap
 
 gold1 = bq1_dag()
